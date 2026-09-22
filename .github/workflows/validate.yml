@@ -14,8 +14,36 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+
+      # Repo reality: root hygiene, private-file sweep, source paths resolve,
+      # plugin.json vs the version printed on the plugin card.
       - name: Guard the public surface
         run: python3 release/validate.py
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code
+
+      # Manifest schema: required fields and their types. Complements the guard
+      # above rather than duplicating it - `claude plugin validate` passes a
+      # marketplace whose plugin `source` points at a directory that does not
+      # exist, and validate.py does not check the manifest schema. Needs no
+      # login; it reads local files only.
+      - name: Validate manifests against the plugin schema
+        run: |
+          set -euo pipefail
+          claude plugin validate .
+          for dir in $(python3 -c "
+          import json
+          spec = json.load(open('release/payload.json'))
+          print(' '.join(p['dest'] for p in spec['plugins'] if p['runtime'] == 'claude'))"); do
+            echo "--- $dir"
+            claude plugin validate "./$dir"
+          done
