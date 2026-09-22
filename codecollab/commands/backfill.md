@@ -1,9 +1,9 @@
 ---
-description: Backfill pre-existing Claude Code sessions into Vonic memory (dry-run first, then confirm)
+description: Backfill pre-existing Claude Code sessions into becos memory (dry-run first, then confirm)
 argument-hint: "[project] [session-id ...] [--async] [--campaign name] [--watch]"
 ---
 
-Ingest the user's **pre-existing** Claude Code session transcripts into Vonic memory. codecollab
+Ingest the user's **pre-existing** Claude Code session transcripts into becos memory. codecollab
 captures sessions going forward and fully backfills any session the user *reopens* (the Stop hook
 reads the whole transcript); this command sweeps the sessions they will *not* reopen.
 

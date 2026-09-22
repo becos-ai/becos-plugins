@@ -42,7 +42,7 @@
     "timestamp": "2026-08-09T06:00:00+00:00",
     "role": "user",
     "text": "example prompt text",
-    "repositoryName": "vonic-codecollab-plugin",
+    "repositoryName": "becos-claude-plugin",
     "branch": "main",
     "commitId": "0123456789abcdef0123456789abcdef01234567",
     "sessionId": "0f9b1c2d-3e4f-4a5b-8c7d-9e0f1a2b3c4d",

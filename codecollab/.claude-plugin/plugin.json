@@ -1,6 +1,6 @@
 {
   "name": "codecollab",
-  "version": "0.23.2",
+  "version": "0.23.3",
   "description": "Incrementally ships each Claude Code turn's prompt + text reply to the tenant's gbrain. Never sends thinking, tool calls, code, or patches unless you opt in (VONIC_CAPTURE_THINKING / VONIC_CAPTURE_CODE, both off by default). After installing, run /codecollab:login, then /codecollab:backfill for existing sessions.",
   "author": {
     "name": "Becos"
