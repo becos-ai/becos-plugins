@@ -12,14 +12,20 @@
 
 name: publish payload
 
+# Fires on any push to main, not only on a tag: neither source repo tags
+# reliably, and publishing is idempotent - if the payload is unchanged the job
+# exits without committing. When the payload HAS changed but the version has
+# not, the release tag already exists and the job fails loudly, which is what
+# turns "every change bumps the version" from a convention into a rule.
 on:
   push:
+    branches: [main]
     tags: ['v*']
   workflow_dispatch:
     inputs:
       ref:
-        description: 'Tag or ref to publish'
-        required: true
+        description: 'Tag or ref to publish (defaults to the triggering ref)'
+        required: false
 
 env:
   PLUGIN_ID: codecollab
@@ -94,6 +100,12 @@ jobs:
             exit 1
           fi
           git tag -a "$tag" -m "$PLUGIN_ID $VERSION"
-          git push origin HEAD:main
+          # The other source repo may have published while this job ran.
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then break; fi
+            echo "push rejected (attempt $attempt) - rebasing onto the newer main"
+            git pull --rebase origin main
+            [ "$attempt" = 3 ] && exit 1
+          done
           git push origin "$tag"
           echo "::notice::published $PLUGIN_ID $VERSION as $tag"
