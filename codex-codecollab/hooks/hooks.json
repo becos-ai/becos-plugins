@@ -1,5 +1,5 @@
 {
-  "description": "codecollab capture + recall (vonic becos brain).",
+  "description": "codecollab capture + recall (becos brain).",
   "hooks": {
     "SessionStart": [
       {

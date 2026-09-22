@@ -53,7 +53,7 @@ def _render(plugin_root: Path) -> str:
            f'exec python3 "{script}"')
     return f"""---
 name: codecollab-backfill
-description: Backfill pre-existing Codex sessions into Vonic/becos memory. Use when the user asks to backfill, ingest, or import past/existing Codex sessions or history into memory. Dry-run first; only deliver after the user confirms.
+description: Backfill pre-existing Codex sessions into becos memory. Use when the user asks to backfill, ingest, or import past/existing Codex sessions or history into memory. Dry-run first; only deliver after the user confirms.
 ---
 <!-- {MARKER} -->
 

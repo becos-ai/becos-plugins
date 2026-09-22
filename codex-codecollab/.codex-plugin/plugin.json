@@ -1,6 +1,6 @@
 {
   "name": "codex-codecollab",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "Capture each turn to your becos brain and recall relevant memory before every prompt.",
   "author": {
     "name": "Becos"
@@ -8,9 +8,9 @@
   "license": "Proprietary",
   "interface": {
     "displayName": "codecollab",
-    "shortDescription": "v0.6.1 \u00b7 Session memory: capture + recall + backfill past sessions",
+    "shortDescription": "v0.6.2 \u00b7 Session memory: capture + recall + backfill past sessions",
     "longDescription": "On each user prompt, codecollab calls your becos brain (vonic_query) and injects relevant memory as additional context; on each turn it saves the prompt + assistant reply to the brain. Never sends reasoning, commands, or tool I/O.",
-    "developerName": "Vonic",
+    "developerName": "Becos",
     "category": "Productivity",
     "capabilities": [
       "Read",
