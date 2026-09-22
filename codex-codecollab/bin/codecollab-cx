@@ -1,0 +1,257 @@
+#!/usr/bin/env python3
+"""codecollab-cx — one-command setup for the Codex codecollab hooks.
+
+Browser sign-in (PKCE, two steps — no email, OTP, or password):
+
+  codecollab-cx login [--gateway <url>] [--author <name>] [--becos-url <url>] [--with-mcp]
+      → writes the JWT-mint script + hook env, then opens a browser authorization URL.
+        No flags are needed on the production gateway — the URLs default (see DEFAULT_GATEWAY /
+        DEFAULT_BECOS_URL below), which is what lets the in-chat `codecollab-login` skill run this
+        same command with nothing for the user to type.
+  codecollab-cx login <UUID>
+      → completes the sign-in with the code shown after authorizing, and verifies the mint.
+
+The hooks themselves live inside the plugin (hooks/hooks.json, auto-discovered when the plugin is
+enabled) — login only configures AUTH/ENV. After it succeeds: enable Codex hooks
+(`codex features enable hooks`), TRUST the hooks on first run, and restart Codex. Never prints the JWT.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+PLUGIN = Path(__file__).resolve().parent.parent
+DELIVER = PLUGIN / "deliver"
+CODEX_HOME = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
+ENVFILE = CODEX_HOME / "codecollab.env"
+MINT = CODEX_HOME / "codecollab-mint-jwt.sh"
+
+# Production defaults, so a plain `codecollab-cx login` needs no flags — this is what lets the
+# in-chat `codecollab-login` skill run the same command with nothing for the user to type or know.
+# They live HERE and not in the skill's SKILL.md so the terminal and in-chat paths share one source
+# of truth, and changing a URL doesn't require re-rendering every installed skill.
+DEFAULT_GATEWAY = "https://becos.ai"
+DEFAULT_BECOS_URL = "https://becos.ai/mcp/"
+
+
+def die(msg: str) -> "None":
+    print(f"error: {msg}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def resolve_becos_url(gateway: str, explicit: str | None) -> str:
+    # --becos-url > gateway discovery > existing real value > the built-in default (ONLY on the
+    # default gateway). NEVER write a placeholder: a bad VONIC_BECOS_URL silently breaks
+    # recall+capture. Fail loudly instead, overwriting nothing.
+    if explicit:
+        return explicit
+    try:
+        import urllib.request
+        with urllib.request.urlopen(gateway.rstrip("/") + "/plugin/gbrain-config", timeout=8) as r:
+            j = json.loads(r.read().decode())
+            for k in ("becos_url", "gbrain_url", "url"):
+                if j.get(k):
+                    return j[k]
+    except Exception:  # noqa: BLE001 — best-effort discovery
+        pass
+    try:
+        for line in ENVFILE.read_text("utf-8").splitlines():
+            if line.startswith("VONIC_BECOS_URL=") and "SET-ME" not in line.upper():
+                return line.split("=", 1)[1].strip()
+    except Exception:  # noqa: BLE001
+        pass
+    # Last resort: the built-in default — but ONLY when this is the default gateway. On a custom
+    # (self-hosted) gateway the production connector is the WRONG answer, so fail instead.
+    if gateway.rstrip("/") == DEFAULT_GATEWAY.rstrip("/"):
+        return DEFAULT_BECOS_URL
+    die("could not determine the becos URL — re-run with:  --becos-url https://<connector>/mcp/\n"
+        "(nothing was written; your existing config is untouched)")
+
+
+def resolve_author(explicit: str | None) -> str:
+    """VONIC_AUTHOR_NAME for repository memory — reconciled with our auth system, not git. Browser
+    login carries no email, so: --author wins, else git user.email, else git user.name, else FAIL.
+    An empty author SILENTLY DROPS every captured turn, and a skill-driven login relays output
+    through a model that may swallow a stderr warning — so this is a hard error, not a warning.
+    Nothing is written when it fires. Use the SAME value on every machine/tool."""
+    if explicit and explicit.strip():
+        return explicit.strip()
+    for key in ("user.email", "user.name"):
+        try:
+            v = subprocess.run(["git", "config", "--get", key],
+                               capture_output=True, text=True).stdout.strip()
+            if v:
+                return v
+        except Exception:  # noqa: BLE001
+            pass
+    die("no author identity — every captured turn would be dropped.\n"
+        "Re-run with:  codecollab-cx login --author <your-name-or-email>\n"
+        "(or set git user.email first). Use the SAME value on every machine and tool so your work\n"
+        "shares one author identity. Nothing was written; your existing config is untouched.")
+
+
+def _load_env_file(path: Path) -> None:
+    """Source the codecollab hook env (VONIC_BECOS_URL / _TOKEN_CMD / AUTHOR_NAME / …) into this
+    process so `backfill` authenticates exactly like live capture. Simple KEY=VALUE parsing with
+    optional surrounding quotes; a value already set in the shell wins (setdefault)."""
+    try:
+        for line in path.read_text("utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, val = line.split("=", 1)
+            key = key.strip()
+            val = val.strip()
+            if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
+                val = val[1:-1]
+            os.environ.setdefault(key, val)
+    except OSError:
+        pass
+
+
+def run_backfill(rest: list[str]) -> int:
+    """`codecollab-cx backfill [--deliver] [--async] [--project X] [--session Y] [--watch] …`.
+
+    Loads the hook env, then hands off to the vendored discovery+delivery core (deliver/cx_backfill.py),
+    which does the rollout parsing + dry-run table + upload. Dry run by default; --deliver ships."""
+    _load_env_file(ENVFILE)
+    script = DELIVER / "cx_backfill.py"
+    if not script.exists():
+        die(f"backfill core not found at {script}")
+    return subprocess.run([sys.executable, str(script), *rest]).returncode
+
+
+def _connect() -> Path:
+    connect = DELIVER / "connect.py"
+    if not connect.exists():
+        die(f"vendored connect.py not found at {connect}")
+    return connect
+
+
+def _verify_mint() -> None:
+    jwt = subprocess.run(["bash", str(MINT)], capture_output=True, text=True)
+    ok = jwt.stdout.strip().startswith("eyJ")
+    print("\n" + ("✓ JWT mint works — auth is configured."
+                  if ok else "⚠ mint did not return a JWT yet — re-run login or check the gateway."))
+
+
+def login_complete(code: str) -> int:
+    """Second step: redeem the browser authorization code, then confirm the mint works."""
+    rc = subprocess.run([sys.executable, str(_connect()), "complete", code])
+    if rc.returncode != 0:
+        die("gateway authorization failed (start over with:  codecollab-cx login --gateway <url>)")
+    _verify_mint()
+    print("\nAuth is ready. Enable + trust the hooks, then restart Codex:\n"
+          "  1. codex features enable hooks\n"
+          "  2. Restart Codex (or start a new task) and TRUST the codecollab hooks when prompted.\n"
+          "  3. Ask a question; check ~/.cache/codecollab/cx-plugin.log and for a -cx- page in becos.")
+    return 0
+
+
+def login_start(gateway: str, becos_url_arg: str | None, author_arg: str | None,
+                with_mcp: bool) -> int:
+    """First step: write the mint script + env (+ optional MCP), then open browser authorization."""
+    CODEX_HOME.mkdir(parents=True, exist_ok=True)
+    becos_url = resolve_becos_url(gateway, becos_url_arg)
+    author = resolve_author(author_arg)
+
+    # 1) mint script — exchanges the cached gateway SESSION token for a short-lived JWT at run time.
+    MINT.write_text(
+        "#!/usr/bin/env bash\n"
+        "# Mint a fresh gateway JWT by exchanging the cached session token. Written by codecollab-cx.\n"
+        "# On failure (expired session / unreachable gateway) prints ONE clean line, not a traceback.\n"
+        "set -euo pipefail\n"
+        'AUTH="$HOME/.cache/codecollab/gateway-auth.json"\n'
+        "GW=$(python3 -c \"import json;print(json.load(open('$AUTH'))['gateway'])\")\n"
+        "SESS=$(python3 -c \"import json;print(json.load(open('$AUTH'))['token'])\")\n"
+        'resp=$(curl -sf -X POST "$GW/oauth/token" -H "Authorization: Bearer $SESS") || {\n'
+        '  echo "codecollab: gateway session expired or unreachable — re-authenticate (re-run login)." >&2\n'
+        "  exit 1\n"
+        "}\n"
+        "printf '%s' \"$resp\" | python3 -c \"import sys,json;print(json.load(sys.stdin)['access_token'])\" 2>/dev/null || {\n"
+        '  echo "codecollab: could not parse the gateway token response." >&2\n'
+        "  exit 1\n"
+        "}\n", "utf-8")
+    MINT.chmod(0o755)
+
+    # 2) env file (Mode A)
+    ENVFILE.write_text(
+        f"# Written by codecollab-cx login — {datetime.now(timezone.utc).isoformat()}\n"
+        f"VONIC_BECOS_URL={becos_url}\n"
+        "VONIC_BECOS_IDENTITY_FROM_TOKEN=1\n"
+        # QUOTE the value: it contains a space, so an unquoted `VAR=bash /path` would, when the env
+        # file is shell-sourced, RUN /path (mint script) and print the JWT. Quoting = plain assignment.
+        f'VONIC_BECOS_TOKEN_CMD="bash {MINT}"\n'
+        f"VONIC_AUTHOR_NAME={author}\n"
+        "VONIC_CODECOLLAB_CLIENT_TAG=cx\n"
+        "VONIC_CODECOLLAB_DEBUG=1\n", "utf-8")
+
+    # NOTE: login configures AUTH/ENV only. The hooks live inside the plugin (hooks/hooks.json,
+    # auto-discovered when the plugin is enabled) — do NOT also write a global ~/.codex/hooks.json,
+    # or Codex runs both sources and every turn is captured/recalled twice.
+
+    # 3) optional passive-recall MCP registration
+    if with_mcp:
+        codex = os.environ.get("CODEX_CLI_PATH", "codex")
+        try:
+            subprocess.run([codex, "mcp", "add", "becos", "--url", becos_url,
+                            "--bearer-token-env-var", "VONIC_BECOS_TOKEN"], check=False)
+        except Exception as exc:  # noqa: BLE001
+            print(f"  (mcp add skipped: {exc})")
+
+    print(f"✓ wrote {MINT}")
+    print(f"✓ wrote {ENVFILE}")
+    print(f"✓ author identity: {author or '(unset — pass --author or set git user.email)'}"
+          + ("" if author_arg else "   (use the SAME value on every tool)"))
+
+    # 4) browser authorization (PKCE start) — prints the URL and caches the pending verifier.
+    print("\n→ Opening gateway authorization…\n")
+    rc = subprocess.run([sys.executable, str(_connect()), "start", "--gateway", gateway])
+    if rc.returncode != 0:
+        die("could not start gateway authorization")
+    print("\nAfter authorizing in the browser, finish with:\n"
+          "  codecollab-cx login <UUID shown after authorization>")
+    return 0
+
+
+def main() -> int:
+    # Handle `backfill` BEFORE argparse so its flags (--deliver/--async/--project/…) forward verbatim
+    # to the core; argparse's REMAINDER intercepts leading `--` options, which we don't want here.
+    if len(sys.argv) > 1 and sys.argv[1] == "backfill":
+        return run_backfill(sys.argv[2:])
+
+    ap = argparse.ArgumentParser(prog="codecollab-cx")
+    sub = ap.add_subparsers(dest="cmd")
+    lg = sub.add_parser("login", help="browser sign-in + write hooks/env "
+                        "(step 1: --gateway <url>; step 2: pass the <UUID> shown after authorizing)")
+    lg.add_argument("code", nargs="?",
+                    help="UUID from the browser — completes a pending sign-in (step 2)")
+    lg.add_argument("--gateway", help=f"gateway base URL (default: {DEFAULT_GATEWAY})")
+    lg.add_argument("--author", help="how your coding work is attributed in memory "
+                    "(VONIC_AUTHOR_NAME); defaults to git user.email/name. Use the SAME value on "
+                    "every machine/tool so your work shares one author identity, not duplicates.")
+    lg.add_argument("--becos-url")
+    lg.add_argument("--with-mcp", action="store_true",
+                    help="also register the connector as a Codex MCP server (passive recall)")
+    sub.add_parser("backfill", help="sweep pre-existing Codex sessions into memory "
+                   "(dry-run by default; pass --deliver [--async] to ship; also --project/--session/"
+                   "--watch/--campaign)")
+    args = ap.parse_args()
+    if args.cmd != "login":
+        ap.print_help()
+        return 0
+
+    if args.code:                          # step 2 — complete a pending browser sign-in
+        return login_complete(args.code)
+    # step 1 — start. No flags needed on the production gateway; that is what makes the in-chat
+    # `codecollab-login` skill able to run this with nothing for the user to supply.
+    return login_start(args.gateway or DEFAULT_GATEWAY, args.becos_url, args.author, args.with_mcp)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

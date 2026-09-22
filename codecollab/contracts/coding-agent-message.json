@@ -1,0 +1,62 @@
+{
+  "$comment": [
+    "FROZEN CONTRACT for the REST transport's per-message payload (capture.py _deliver_rest).",
+    "The receiving endpoint (vonic_gateway POST /integrations/coding-agent, model",
+    "CodingAgentMessage) declares extra='forbid': ONE unknown key rejects the ENTIRE message",
+    "with a 422, taking every valid field down with it. There is no partial acceptance.",
+    "",
+    "So a new key is a BREAKING change and must land server-first:",
+    "  1. add the field to the gateway model + a consumer for it, deploy;",
+    "  2. only then add it here and start sending it.",
+    "",
+    "History: codecollab de68953 (2026-07-31) added 'repositoriesTouched' for a multi-repo",
+    "fan-out feature whose server half was never built. No repo ever consumed it, and because",
+    "of extra='forbid' it 422'd every message whenever linkage was enabled — silently breaking",
+    "the sessionId/turnIndex fields the gateway HAD added the same day (ff9b684). Removed in",
+    "0.12.0. This file exists so that cannot happen twice.",
+    "",
+    "Both sides test against this fixture; keep the copies in sync:",
+    "  codecollab: scripts/test_capture.py  (asserts emitted keys are a subset of allowed)",
+    "  gateway:    tests/contract/test_coding_agent_contract.py  (validates golden vs model)"
+  ],
+
+  "allowed_keys": [
+    "type",
+    "timestamp",
+    "role",
+    "text",
+    "repositoryName",
+    "branch",
+    "commitId",
+    "sessionId",
+    "turnIndex"
+  ],
+
+  "required_keys": [
+    "timestamp",
+    "role",
+    "text"
+  ],
+
+  "golden_payload": {
+    "timestamp": "2026-08-09T06:00:00+00:00",
+    "role": "user",
+    "text": "example prompt text",
+    "repositoryName": "vonic-codecollab-plugin",
+    "branch": "main",
+    "commitId": "0123456789abcdef0123456789abcdef01234567",
+    "sessionId": "0f9b1c2d-3e4f-4a5b-8c7d-9e0f1a2b3c4d",
+    "turnIndex": 0
+  },
+
+  "notes": {
+    "type": "Optional; 'remember' (default) or 'get'. capture.py never sends it.",
+    "commitId": "Must be exactly 40 hex chars, or the message 422s.",
+    "timestamp": "Must include a timezone offset — a naive datetime is rejected.",
+    "branch": "Requires repositoryName; branch/commitId without it is rejected.",
+    "sessionId": "Becomes the server's conversation key. Absent, the server derives a stable id from (tenant, user, repository, branch), collapsing every turn into one conversation.",
+    "turnIndex": "Rendered into the message's text prefix only; no structural effect.",
+    "repositories_touched": "NOT a key here, deliberately. The per-turn repository report (0.17.0) ships only on the becos transport, inside metadata.event.metadata — a free-form bag, so it breaks no strict model. This REST payload has no free-form field, so carrying it would need a gateway change first. Same reasoning that removed repositoriesTouched in 0.12.0.",
+    "Idempotency-Key": "Sent as a HEADER, not a body key. Must be a UUID; required for 'remember'."
+  }
+}

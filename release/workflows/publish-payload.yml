@@ -1,0 +1,99 @@
+# Install into a PRIVATE source repo at .github/workflows/publish-payload.yml
+#
+# On a vX.Y.Z tag, copies this repo's allowlisted payload into the public
+# becos-ai/becos-plugins monorepo as ONE squashed commit, then tags it there.
+#
+# Set PLUGIN_ID below to the id in becos-plugins/release/payload.json:
+#   becos-ai/becos-claude-plugin     -> codecollab
+#   becos-ai/codex-codecollab-plugin -> codex-codecollab
+#
+# Requires secret BECOS_PLUGINS_TOKEN: a fine-grained PAT scoped to
+# becos-ai/becos-plugins with Contents: read and write.
+
+name: publish payload
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Tag or ref to publish'
+        required: true
+
+env:
+  PLUGIN_ID: codecollab
+  PUBLIC_REPO: becos-ai/becos-plugins
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out this (private) source repo
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+          path: source
+
+      - name: Check out the public monorepo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.PUBLIC_REPO }}
+          token: ${{ secrets.BECOS_PLUGINS_TOKEN }}
+          path: public
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Copy the allowlisted payload
+        run: python3 public/release/sync_payload.py --plugin "$PLUGIN_ID" --from source
+
+      - name: Guard the public surface
+        working-directory: public
+        run: python3 release/validate.py
+
+      - name: Prove the payload matches this source tree
+        run: python3 public/release/sync_payload.py --plugin "$PLUGIN_ID" --from source --check
+
+      - name: Read the released version
+        id: v
+        run: |
+          set -euo pipefail
+          manifest=$(python3 -c "
+          import json,sys
+          spec=json.load(open('public/release/payload.json'))
+          p=next(p for p in spec['plugins'] if p['id']=='$PLUGIN_ID')
+          print(p['dest'] + '/' + p['manifest'])")
+          version=$(python3 -c "import json;print(json.load(open('public/$manifest'))['version'])")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Publishing $PLUGIN_ID $version"
+
+      - name: Commit and push
+        working-directory: public
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name  "becos-release[bot]"
+          git config user.email "release@becos.ai"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No payload change for $PLUGIN_ID $VERSION - nothing to publish."
+            exit 0
+          fi
+          # One squashed commit per release. Commit messages here are PUBLIC.
+          git commit -m "release: $PLUGIN_ID $VERSION"
+          tag="$PLUGIN_ID--v$VERSION"
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+            echo "::error::tag $tag already exists in $PUBLIC_REPO - bump the version"
+            exit 1
+          fi
+          git tag -a "$tag" -m "$PLUGIN_ID $VERSION"
+          git push origin HEAD:main
+          git push origin "$tag"
+          echo "::notice::published $PLUGIN_ID $VERSION as $tag"

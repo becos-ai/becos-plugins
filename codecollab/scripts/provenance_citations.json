@@ -1,0 +1,89 @@
+{
+  "_comment": "FROZEN CONTRACT (PLAN_repo_fact_attribution.md Phase 0). Canonical machine-readable repo-provenance citation grammar shared by the agent emitter (oc-codecollab-plugin src/provenance.ts) and the becos parser (becos_memforest coding/provenance.py). The `cases` are AUTHORITATIVE: any parser on either side must reproduce them exactly. The `reference_regex` entries are documentation of the intended shape, not the contract.",
+  "grammar": {
+    "token": "[repo:<alias> path:<relpath> symbol:<symbol>]",
+    "keys_in_order": ["repo", "path", "symbol"],
+    "required_keys": ["repo"],
+    "optional_keys": ["path", "symbol"],
+    "value_charset": "one-or-more chars that are not whitespace and not ']'",
+    "one_repo_per_token": true,
+    "reference_regex_python": "\\[repo:(?P<alias>[^\\s\\]]+)(?:\\s+path:(?P<path>[^\\s\\]]+))?(?:\\s+symbol:(?P<symbol>[^\\s\\]]+))?\\]",
+    "reference_regex_js": "\\[repo:(?<alias>[^\\s\\]]+)(?:\\s+path:(?<path>[^\\s\\]]+))?(?:\\s+symbol:(?<symbol>[^\\s\\]]+))?\\]"
+  },
+  "strip_rule": "Remove every matched token span from the text, then collapse each run of horizontal whitespace left around a removal to a single space, then trim leading/trailing whitespace on each line. `[analysis]` and any bracket that is not a `repo:` token are NOT touched.",
+  "sentinels": {
+    "analysis": "[analysis] is not a repo token (no `repo:` key) -> zero tokens extracted, text unchanged. Signals author inference, not repo-derived fact.",
+    "repo_unknown": "[repo:unknown] parses as alias='unknown'. The PARSER still extracts it; the RESOLVER (Phase 2) treats 'unknown' as no-match -> ambient fallback."
+  },
+  "cases": [
+    {
+      "name": "full_token",
+      "input": "[repo:agent path:src/memory/store.py symbol:MemoryStore.save]",
+      "tokens": [{"repo": "agent", "path": "src/memory/store.py", "symbol": "MemoryStore.save"}],
+      "stripped": ""
+    },
+    {
+      "name": "repo_and_path",
+      "input": "[repo:gateway path:app/routes/events.py]",
+      "tokens": [{"repo": "gateway", "path": "app/routes/events.py", "symbol": null}],
+      "stripped": ""
+    },
+    {
+      "name": "repo_only",
+      "input": "[repo:agent]",
+      "tokens": [{"repo": "agent", "path": null, "symbol": null}],
+      "stripped": ""
+    },
+    {
+      "name": "inline_prose_stripped",
+      "input": "Switched to Postgres in [repo:vonic_agent path:src/memory/store.py] because SQLite locked.",
+      "tokens": [{"repo": "vonic_agent", "path": "src/memory/store.py", "symbol": null}],
+      "stripped": "Switched to Postgres in because SQLite locked."
+    },
+    {
+      "name": "two_repos_per_clause",
+      "input": "[repo:agent path:src/events.py] emits the event; [repo:gateway path:app/routes/events.py] consumes it.",
+      "tokens": [
+        {"repo": "agent", "path": "src/events.py", "symbol": null},
+        {"repo": "gateway", "path": "app/routes/events.py", "symbol": null}
+      ],
+      "stripped": "emits the event; consumes it."
+    },
+    {
+      "name": "header_form",
+      "input": "### [repo:agent] Memory subsystem",
+      "tokens": [{"repo": "agent", "path": null, "symbol": null}],
+      "stripped": "### Memory subsystem"
+    },
+    {
+      "name": "hyphen_alias",
+      "input": "[repo:oc-codecollab-plugin path:src/provenance.ts]",
+      "tokens": [{"repo": "oc-codecollab-plugin", "path": "src/provenance.ts", "symbol": null}],
+      "stripped": ""
+    },
+    {
+      "name": "sentinel_unknown_parses",
+      "input": "[repo:unknown]",
+      "tokens": [{"repo": "unknown", "path": null, "symbol": null}],
+      "stripped": ""
+    },
+    {
+      "name": "analysis_not_a_token",
+      "input": "This is my own inference [analysis].",
+      "tokens": [],
+      "stripped": "This is my own inference [analysis]."
+    },
+    {
+      "name": "malformed_space_in_path_rejected",
+      "input": "[repo:agent path:src/my file.py]",
+      "tokens": [],
+      "stripped": "[repo:agent path:src/my file.py]"
+    },
+    {
+      "name": "no_citation",
+      "input": "The build passed on the first try.",
+      "tokens": [],
+      "stripped": "The build passed on the first try."
+    }
+  ]
+}

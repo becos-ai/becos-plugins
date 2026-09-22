@@ -1,0 +1,27 @@
+{
+  "_comment": "ALLOWLIST. Only paths listed in `include` are published. Anything not listed here never leaves the private repo. Adding a file to a source repo does NOT publish it - it must be added here deliberately.",
+  "allowed_root_files": [".gitignore", "README.md", "LICENSE"],
+  "allowed_root_dirs": [".claude-plugin", ".agents", ".github", "release", "codecollab", "codex-codecollab"],
+  "plugins": [
+    {
+      "id": "codecollab",
+      "runtime": "claude",
+      "source_repo": "becos-ai/becos-claude-plugin",
+      "source_subdir": "codecollab",
+      "dest": "codecollab",
+      "manifest": ".claude-plugin/plugin.json",
+      "include": [".claude-plugin", "commands", "contracts", "hooks", "scripts"],
+      "exclude": ["**/__pycache__/**", "**/*.pyc", "scripts/test_*.py"]
+    },
+    {
+      "id": "codex-codecollab",
+      "runtime": "codex",
+      "source_repo": "becos-ai/codex-codecollab-plugin",
+      "source_subdir": ".",
+      "dest": "codex-codecollab",
+      "manifest": ".codex-plugin/plugin.json",
+      "include": [".codex-plugin", "bin", "deliver", "hooks"],
+      "exclude": ["**/__pycache__/**", "**/*.pyc", "deliver/VENDORED_FROM.txt"]
+    }
+  ]
+}
