@@ -73,5 +73,7 @@ task begins, so a task opened before the upgrade keeps the old copy.
 | `.claude-plugin/`, `.agents/` | the two marketplace manifests |
 | `release/` | how payloads get published here |
 
+Licensed under [Apache-2.0](LICENSE).
+
 This is a **release repository**. Its contents are published from the plugins' development repos,
 one squashed commit per release. Issues and questions are welcome here.

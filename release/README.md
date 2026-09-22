@@ -85,8 +85,15 @@ contents are meant to be public, so the blast radius is already small.
 
 ## Before this repo goes public
 
-- [ ] Decide the licence. There is no `LICENSE` file yet, so everything here is "all rights
-      reserved" by default. `becos-oc-plugin` ships Apache-2.0; the Codex manifest declares
-      `Proprietary`. Those disagree — settle it before the first public push.
+- [x] Decide the licence. **Apache-2.0**, matching `becos-oc-plugin` — the `LICENSE` file here is
+      byte-identical to its. That plugin is already published to public npm under Apache-2.0, and its
+      tarball ships `deliver/`, so the shared deliverer is permissively licensed in the wild already;
+      anything stricter here would only be inconsistent, not protective.
+- [ ] Two follow-ups this exposes, both needing an owner's call:
+      - The Codex manifest declares `"license": "Proprietary"`, which now contradicts this repo and
+        the npm package built from the same vendored code.
+      - The Claude manifest declares no licence at all.
+      - Neither this `LICENSE` nor the oc one fills in the appendix's
+        `Copyright [yyyy] [name of copyright owner]`, so no copyright holder is asserted anywhere.
 - [ ] Re-read `codecollab/` and `codex-codecollab/` in full. Publishing is irreversible: forks
       survive repository deletion.
