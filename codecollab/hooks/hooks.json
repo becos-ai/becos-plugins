@@ -17,7 +17,8 @@
     "SessionStart": [
       {
         "hooks": [
-          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/capture.py\" sweep" }
+          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/capture.py\" sweep" },
+          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/handoff.py\" session-start", "timeout": 15 }
         ]
       }
     ],
