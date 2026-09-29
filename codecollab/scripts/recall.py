@@ -47,6 +47,7 @@ Env:
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 import time
@@ -58,6 +59,27 @@ import provenance  # noqa: E402 — repo-provenance citation grammar
 
 _DEFAULT_MAXCHARS = 12000
 _HARD_MAXCHARS = 20000
+_DEFAULT_TIMEOUT = 20.0
+_DEFAULT_LOGCHARS = 500
+_DEFAULT_NOTIFY_INTERVAL = 3600.0
+
+
+def _parse_positive_float(value: str | None, default: float) -> float:
+    """Parse a finite positive float, falling back for unsafe optional configuration."""
+    try:
+        parsed = float((value or "").strip())
+    except (TypeError, ValueError):
+        return default
+    return parsed if math.isfinite(parsed) and parsed > 0 else default
+
+
+def _parse_positive_int(value: str | None, default: int) -> int:
+    """Parse a positive integer, falling back for unsafe optional configuration."""
+    try:
+        parsed = int((value or "").strip())
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
 
 
 def _parse_recall_maxchars(value: str | None) -> int:
@@ -81,10 +103,12 @@ def _truncate_answer(answer: str, cap: int) -> str:
     return answer[:cap - len(marker)] + marker
 
 
-_TIMEOUT = float(os.environ.get("VONIC_RECALL_TIMEOUT", "20"))
+_TIMEOUT = _parse_positive_float(os.environ.get("VONIC_RECALL_TIMEOUT"), _DEFAULT_TIMEOUT)
 _MAXCHARS = _parse_recall_maxchars(os.environ.get("VONIC_RECALL_MAXCHARS"))
-_LOGCHARS = int(os.environ.get("VONIC_RECALL_LOGCHARS", "500"))
-_NOTIFY_INTERVAL = float(os.environ.get("VONIC_RECALL_NOTIFY_INTERVAL", "3600"))
+_LOGCHARS = _parse_positive_int(os.environ.get("VONIC_RECALL_LOGCHARS"), _DEFAULT_LOGCHARS)
+_NOTIFY_INTERVAL = _parse_positive_float(
+    os.environ.get("VONIC_RECALL_NOTIFY_INTERVAL"), _DEFAULT_NOTIFY_INTERVAL
+)
 
 # Framing sent to vonic_query so it RECALLS relevant memory instead of answering the prompt
 # itself (vonic_query is an agentic assistant — un-framed, it answers, which for meta/chatty

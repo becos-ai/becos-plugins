@@ -134,10 +134,10 @@ def discover() -> list[dict]:
     return rows
 
 
-# Canonical in capture.py (live delivery uses the same enqueue tool + fallback); reused here so the
-# "unknown tool" → sync-fallback contract stays identical across the backfill and live paths.
+# Reuse the live path's fallback exception, but only raise it for explicit unknown-tool responses.
 _ToolUnavailable = capture._ToolUnavailable
-_UNAVAIL_HINTS = capture._UNAVAIL_HINTS
+_UNKNOWN_TOOL_HINTS = ("tool not found", "unknown tool", "no such tool", "not registered",
+                       "-32601", "unknown_tool")
 
 
 def _remove_buffer(path: str) -> None:
@@ -261,13 +261,17 @@ def _async_deliver(rows: list[dict], timeout: float, watch: bool, batch_id: str)
             print(f"  --    {label}  (nothing to deliver)")
             continue
         sessions = [{"session_id": r["session"],
-                     "turns": [{"event_id": e["event_id"], "args": e["args"]} for e in events]}]
+                      "turns": [{"event_id": e["event_id"], "args": e["args"]} for e in events]}]
         try:
-            gbrain_client.call_tool(url, token, "becos_backfill_upload",
-                                    {"sessions": sessions, "batch_id": batch_id},
-                                    timeout, extra_headers=ident)
+            result = gbrain_client.call_tool(url, token, "becos_backfill_upload",
+                                             {"sessions": sessions, "batch_id": batch_id},
+                                             timeout, extra_headers=ident)
+            capture._backfill_handoff(
+                result, operation="becos_backfill_upload", batch_id=batch_id,
+                session_id=r["session"], turns=len(events),
+            )
         except gbrain_client.GbrainError as exc:
-            if not exc.transport and any(h in str(exc).lower() for h in _UNAVAIL_HINTS):
+            if not exc.transport and any(h in str(exc).lower() for h in _UNKNOWN_TOOL_HINTS):
                 raise _ToolUnavailable() from exc
             skipped.append(r["session"])   # keep the buffer for a later retry
             print(f"  DEFER {label}: {str(exc)[:70]}")
