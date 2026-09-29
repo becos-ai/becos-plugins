@@ -1,6 +1,6 @@
 {
   "name": "codex-codecollab",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "Capture each turn to your becos brain and recall relevant memory before every prompt.",
   "author": {
     "name": "Becos"
@@ -8,7 +8,7 @@
   "license": "Proprietary",
   "interface": {
     "displayName": "codecollab",
-    "shortDescription": "v0.7.1 \u00b7 Session memory: capture + recall + backfill past sessions",
+    "shortDescription": "v0.7.2 \u00b7 Session memory: capture + recall + backfill past sessions",
     "longDescription": "On each user prompt, codecollab calls your becos brain (vonic_query) and injects relevant memory as additional context. On each turn it saves the prompt and assistant reply, with common secret patterns redacted and code blocks moved out of the text; code blocks from the reply are saved separately, also redacted and size-capped (VONIC_CAPTURE_CODE=0 stops that). It also sends the repository-relative paths of files you edited and the repository, branch, author and commit (VONIC_CAPTURE_FILES=0 drops the paths). Never sends reasoning, commands, command output, tool I/O, or diffs. Redaction is best effort, not a guarantee.",
     "developerName": "Becos",
     "category": "Productivity",
