@@ -7,7 +7,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash -lc 'set -a; [ -f \"$HOME/.codex/codecollab.env\" ] && . \"$HOME/.codex/codecollab.env\" >/dev/null 2>&1; set +a; exec python3 \"${PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/hooks/codex_capture.py\"'",
+            "command": "bash -lc 'set -a; [ -f \"$HOME/.codex/codecollab.env\" ] && . \"$HOME/.codex/codecollab.env\" >/dev/null 2>&1; set +a; export VONIC_CODECOLLAB_CLIENT_TAG=cx; exec python3 \"${PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/hooks/codex_capture.py\"'",
             "timeout": 30,
             "statusMessage": "codecollab: sweeping memory"
           }
@@ -19,13 +19,13 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash -lc 'set -a; [ -f \"$HOME/.codex/codecollab.env\" ] && . \"$HOME/.codex/codecollab.env\" >/dev/null 2>&1; set +a; exec python3 \"${PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/deliver/recall.py\"'",
+            "command": "bash -lc 'set -a; [ -f \"$HOME/.codex/codecollab.env\" ] && . \"$HOME/.codex/codecollab.env\" >/dev/null 2>&1; set +a; export VONIC_CODECOLLAB_CLIENT_TAG=cx; exec python3 \"${PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/deliver/recall.py\"'",
             "additionalContextLimit": 0,
             "statusMessage": "codecollab: recalling memory"
           },
           {
             "type": "command",
-            "command": "bash -lc 'set -a; [ -f \"$HOME/.codex/codecollab.env\" ] && . \"$HOME/.codex/codecollab.env\" >/dev/null 2>&1; set +a; exec python3 \"${PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/hooks/codex_capture.py\"'",
+            "command": "bash -lc 'set -a; [ -f \"$HOME/.codex/codecollab.env\" ] && . \"$HOME/.codex/codecollab.env\" >/dev/null 2>&1; set +a; export VONIC_CODECOLLAB_CLIENT_TAG=cx; exec python3 \"${PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/hooks/codex_capture.py\"'",
             "timeout": 10
           }
         ]
@@ -36,7 +36,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash -lc 'set -a; [ -f \"$HOME/.codex/codecollab.env\" ] && . \"$HOME/.codex/codecollab.env\" >/dev/null 2>&1; set +a; exec python3 \"${PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/hooks/codex_capture.py\"'",
+            "command": "bash -lc 'set -a; [ -f \"$HOME/.codex/codecollab.env\" ] && . \"$HOME/.codex/codecollab.env\" >/dev/null 2>&1; set +a; export VONIC_CODECOLLAB_CLIENT_TAG=cx; exec python3 \"${PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/hooks/codex_capture.py\"'",
             "timeout": 30
           }
         ]
@@ -47,7 +47,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash -lc 'set -a; [ -f \"$HOME/.codex/codecollab.env\" ] && . \"$HOME/.codex/codecollab.env\" >/dev/null 2>&1; set +a; exec python3 \"${PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/hooks/codex_capture.py\"'",
+            "command": "bash -lc 'set -a; [ -f \"$HOME/.codex/codecollab.env\" ] && . \"$HOME/.codex/codecollab.env\" >/dev/null 2>&1; set +a; export VONIC_CODECOLLAB_CLIENT_TAG=cx; exec python3 \"${PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/hooks/codex_capture.py\"'",
             "timeout": 3
           }
         ]
