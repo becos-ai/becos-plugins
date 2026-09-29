@@ -32,7 +32,7 @@ Env:
                          so a feature branch still recalls the repo's history · "off" disable
                          recall (an unscoped query would hit the general brain, so it is skipped).
   VONIC_RECALL_TIMEOUT   seconds for the vonic_query call (default 20).
-  VONIC_RECALL_MAXCHARS  cap on injected chars (default 4000) — keeps context lean.
+  VONIC_RECALL_MAXCHARS  cap on injected chars (default 12000, hard maximum 20000).
   VONIC_RECALL_LOGCHARS  chars of the recalled response logged per run (default 500).
   VONIC_CODECOLLAB_DEBUG "1" to log failures + injected-response snippets to
                          ~/.cache/codecollab/recall.log (and failures to stderr).
@@ -56,8 +56,33 @@ import capture  # noqa: E402 — reuse becos config + identity resolution
 import gbrain_client  # noqa: E402
 import provenance  # noqa: E402 — repo-provenance citation grammar
 
+_DEFAULT_MAXCHARS = 12000
+_HARD_MAXCHARS = 20000
+
+
+def _parse_recall_maxchars(value: str | None) -> int:
+    """Parse the defensive recall-text cap without letting bad configuration break recall."""
+    try:
+        parsed = int((value or "").strip())
+    except (TypeError, ValueError):
+        return _DEFAULT_MAXCHARS
+    if parsed <= 0:
+        return _DEFAULT_MAXCHARS
+    return min(parsed, _HARD_MAXCHARS)
+
+
+def _truncate_answer(answer: str, cap: int) -> str:
+    """Cap opaque recall text, keeping a truncation marker inside the selected budget."""
+    if len(answer) <= cap:
+        return answer
+    marker = f"\n…[truncated to {cap} chars]"
+    if len(marker) > cap:
+        marker = "…"[:cap]
+    return answer[:cap - len(marker)] + marker
+
+
 _TIMEOUT = float(os.environ.get("VONIC_RECALL_TIMEOUT", "20"))
-_MAXCHARS = int(os.environ.get("VONIC_RECALL_MAXCHARS", "4000"))
+_MAXCHARS = _parse_recall_maxchars(os.environ.get("VONIC_RECALL_MAXCHARS"))
 _LOGCHARS = int(os.environ.get("VONIC_RECALL_LOGCHARS", "500"))
 _NOTIFY_INTERVAL = float(os.environ.get("VONIC_RECALL_NOTIFY_INTERVAL", "3600"))
 
@@ -80,6 +105,11 @@ _EMPTY_PREFIXES = (
 # Repository-memory scope for the query: `branch` (default) repo + branch · `repo` repo only, so a
 # feature branch still recalls the whole repo's history · `off` no recall at all (see main()).
 _SCOPE = os.environ.get("VONIC_RECALL_SCOPE", "branch").strip().lower()
+
+# Deploy-then-flip gate for forwarding `caller_agent` on the query metadata. DEFAULTS OFF: a
+# vonic-agent that predates migration 0019_query_caller_agent forbids the extra key and would fail
+# every recall. Set to "1" only after the server carrying that field is deployed. See _query_scope.
+_FORWARD_CALLER_AGENT = os.environ.get("VONIC_CODECOLLAB_FORWARD_CALLER_AGENT", "0") == "1"
 
 # The server returns its routing/query errors as ORDINARY STRINGS on the same channel as an
 # answer. Injecting one would hand the model "Repository memory is unavailable." *as recalled
@@ -144,9 +174,14 @@ def _log(outcome: str) -> None:
         os.makedirs(directory, exist_ok=True)
         stamp = time.strftime("%Y-%m-%dT%H:%M:%S")
         tag = os.environ.get("VONIC_CODECOLLAB_CLIENT_TAG", "cc")
+        source = os.environ.get("VONIC_CODECOLLAB_RECALL_SOURCE", "unknown")
+        mode = os.environ.get("VONIC_CODECOLLAB_CALLER_MODE", "unknown")
         with open(os.path.join(directory, "recall.log"), "a", encoding="utf-8") as handle:
             # self-report the client + running build, so the log proves which cached copy fired.
-            handle.write(f"{stamp}  {tag}/v{capture._plugin_version()}  {outcome}\n")
+            handle.write(
+                f"{stamp}  {tag}/v{capture._plugin_version()}  "
+                f"source={source} mode={mode}  {outcome}\n"
+            )
     except Exception:  # noqa: BLE001 — logging must never break the hook
         pass
 
@@ -291,7 +326,9 @@ def _looks_empty(text: str) -> bool:
     return len(t) < 240 and t.startswith(_EMPTY_PREFIXES)
 
 
-def _query_scope(cwd: str, session_id: str | None = None) -> dict | None:
+def _query_scope(
+    cwd: str, session_id: str | None = None, caller_agent: str | None = None
+) -> dict | None:
     """`metadata.event` scoping recall to this checkout, or None for a general-memory query.
 
     Only the fields the query model accepts — no identity, content, timestamps, changed files, or
@@ -317,6 +354,16 @@ def _query_scope(cwd: str, session_id: str | None = None) -> dict | None:
     scope = {"event": event, **_client_identity()}
     if session_id := (session_id or "").strip():
         scope["session_id"] = session_id[:128]
+    # `caller_agent` (OpenCode's configured agent name, e.g. "build" vs a dispatched subagent) is a
+    # SIBLING of `event`, never a field inside it — the server's recall ledger hashes the event
+    # context alone to match a recall against previous ones, so folding caller identity into `event`
+    # would change that hash and orphan every prior recall. `RepositoryQueryMetadata` gained the
+    # optional `caller_agent` field (server migration 0019_query_caller_agent). Forwarding is DEPLOY-
+    # THEN-FLIP gated: an older server without the field rejects any extra key (extra="forbid"), so
+    # this stays OFF by default and must be enabled (VONIC_CODECOLLAB_FORWARD_CALLER_AGENT=1) only
+    # AFTER the vonic-agent carrying migration 0019 is deployed. Omitted when empty regardless.
+    if _FORWARD_CALLER_AGENT and (caller_agent := (caller_agent or "").strip()):
+        scope["caller_agent"] = caller_agent[:64]
     return scope
 
 
@@ -415,6 +462,16 @@ def main() -> int:
         payload = json.load(sys.stdin)
     except Exception:  # noqa: BLE001
         return 0
+    is_claude = capture._client_tag() == "cc"
+    source = str(payload.get("recall_source") or
+                 ("user-prompt-submit" if is_claude else "unknown")).strip()
+    mode = str(payload.get("caller_mode") or ("primary" if is_claude else "unknown")).strip()
+    os.environ["VONIC_CODECOLLAB_RECALL_SOURCE"] = (
+        source if source in {"tool", "system-transform", "user-prompt-submit"} else "unknown"
+    )
+    os.environ["VONIC_CODECOLLAB_CALLER_MODE"] = (
+        mode if mode in {"primary", "subagent", "all"} else "unknown"
+    )
     # UserPromptSubmit is the START boundary of a turn, independent of recall — the marker is
     # stamped before every early return below (slash commands, empty prompts, recall disabled)
     # so `capture.py turn` can scope its repository report to this turn alone.
@@ -424,7 +481,11 @@ def main() -> int:
     except Exception as exc:  # noqa: BLE001 — never block the prompt
         _debug(f"turn marker: {exc}")
 
-    prompt = (payload.get("prompt") or "").strip()
+    # Strip harness-injected `<system-reminder>` banners (e.g. Claude Code's per-turn plan-mode
+    # notice) before the slash-command check and before anything is sent to vonic_query — this is
+    # ephemeral harness control-plane noise, not part of what the user actually asked, and must
+    # never reach the backend (dilutes the recall match; would pollute captured memory too).
+    prompt = capture.strip_system_reminders(payload.get("prompt") or "")
     if not prompt or prompt.startswith("/"):  # not a model turn — inject nothing at all
         return 0
 
@@ -446,7 +507,7 @@ def main() -> int:
         return _flush()
     cwd = payload.get("cwd") or os.getcwd()   # scopes recall to the checkout being worked in
     scope = _query_scope(
-        cwd, payload.get("session_id")
+        cwd, payload.get("session_id"), payload.get("caller_agent")
     )                                         # also names the source on the injected wrapper
     if scope is None:
         # Repository memory is the only brain codecollab may read. An unscoped vonic_query
@@ -473,8 +534,7 @@ def main() -> int:
     if not answer:
         _log(f"empty   prompt={prompt[:60]!r}")
         return _flush()
-    if len(answer) > _MAXCHARS:
-        answer = answer[:_MAXCHARS] + f"\n…[truncated to {_MAXCHARS} chars]"
+    answer = _truncate_answer(answer, _MAXCHARS)
     snippet = " ".join(answer.split())[:_LOGCHARS]
     _log(f"inject  {len(answer)}c  prompt={prompt[:60]!r}  ::  {snippet}")
 
@@ -484,6 +544,10 @@ def main() -> int:
     # after the digest so the thing being graded is already in view.
     if provenance.is_recall_feedback_enabled():
         parts.append(provenance.RECALL_FEEDBACK_INSTRUCTIONS)
+    # Same precondition: guidance on WHICH recalled citations are worth expanding is meaningless
+    # on a turn that recalled none, so it rides only on the path that produced ids.
+    if provenance.is_resolve_tool_enabled():
+        parts.append(provenance.RESOLVE_TOOL_INSTRUCTIONS)
     return _flush()
 
 

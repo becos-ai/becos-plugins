@@ -494,6 +494,8 @@ _MAX_EVENT_PATHS = 50  # referenced paths per tool event
 _MAX_TOOL_EVENTS = 300
 _MAX_FILES = 500       # per aggregate bucket
 _MAX_PATH_LEN = 1_024
+_MAX_SYMBOLS = 100
+_MAX_SYMBOL_LEN = 128
 
 
 def _repo_ref(abspath: str, resolver: _Resolver, *, allow_dir: bool) -> dict | None:
@@ -547,8 +549,8 @@ def resolve_capture_paths(turn: dict, default_cwd: str,
     if events:
         result["tool_events"] = events[:_MAX_TOOL_EVENTS]
 
-    # Bucket file operations, keeping the most informative op per (repo, path).
-    best: dict[tuple[str, str], tuple[str, dict]] = {}
+    # Bucket file operations, keeping the most informative op and summing deterministic diff stats.
+    best: dict[tuple[str, str], tuple[str, dict, int, int]] = {}
     for op_ref in turn.get("file_ops") or []:
         if not isinstance(op_ref, dict):
             continue
@@ -560,13 +562,38 @@ def resolve_capture_paths(turn: dict, default_cwd: str,
         if not ref:
             continue
         key = (ref["repo"], ref["path"])
-        if key not in best or _OP_RANK[op] > _OP_RANK[best[key][0]]:
-            best[key] = (op, ref)
+        additions = op_ref.get("additions")
+        deletions = op_ref.get("deletions")
+        additions = additions if isinstance(additions, int) and additions >= 0 else 0
+        deletions = deletions if isinstance(deletions, int) and deletions >= 0 else 0
+        if key in best:
+            old_op, old_ref, old_additions, old_deletions = best[key]
+            if _OP_RANK[op] < _OP_RANK[old_op]:
+                op = old_op
+            best[key] = (op, old_ref, old_additions + additions, old_deletions + deletions)
+        else:
+            best[key] = (op, ref, additions, deletions)
     buckets: dict[str, list[dict]] = {}
-    for op, ref in best.values():
+    changed_files: list[dict] = []
+    for op, ref, additions, deletions in best.values():
         buckets.setdefault(_FILE_OP_BUCKET[op], []).append(ref)
+        if op != "read":
+            changed_files.append({**ref, "status": op, "additions": additions,
+                                  "deletions": deletions})
     for bucket, refs in buckets.items():
         result[bucket] = refs[:_MAX_FILES]
+    if changed_files:
+        result["changed_files"] = changed_files[:_MAX_FILES]
+
+    symbols: list[str] = []
+    for symbol in turn.get("mentioned_symbols") or []:
+        if (isinstance(symbol, str) and symbol and len(symbol) <= _MAX_SYMBOL_LEN
+                and symbol not in symbols):
+            symbols.append(symbol)
+        if len(symbols) >= _MAX_SYMBOLS:
+            break
+    if symbols:
+        result["mentioned_symbols"] = symbols
     return result
 
 

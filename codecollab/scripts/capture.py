@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import fcntl
 import glob
+import fnmatch
 import hashlib
 import ipaddress
 import json
@@ -234,7 +235,15 @@ def _strip_code(text: str) -> str:
 
 
 def _clean(text: str) -> str:
-    text = _strip_code(text.strip())
+    """Sanitise always-sent prose: strip fenced code, redact secrets, then cap.
+
+    The order is load-bearing. `_REDACTORS` was only ever applied to `thinking` and `code` — the
+    two categories that used to be opt-in — so a token pasted into a prompt shipped verbatim in
+    the one field that is always sent. Redaction therefore happens HERE, and it happens BEFORE the
+    cap: truncating first can slice a token in half so no pattern matches the remainder, leaving
+    a partial credential in the payload that looks redacted-adjacent and is not.
+    """
+    text = _redact(_strip_code(text.strip()))
     cap = _env_int("VONIC_CODECOLLAB_MAX_CHARS", 100_000)
     return text if cap <= 0 or len(text) <= cap else text[:cap] + "\n[truncated]"
 
@@ -457,14 +466,28 @@ def _rest_text(raw: str) -> str:
 
 # ── transcript parsing ───────────────────────────────────────────────────────
 
+# Harnesses (Claude Code, and potentially others) splice ephemeral `<system-reminder>...
+# </system-reminder>` banners into the literal prompt/message text — e.g. a per-prompt "plan
+# mode is active" notice. That is harness control-plane noise, not durable prose: it must not
+# reach vonic_query (dilutes/pollutes the recall match) or vonic_remember (pollutes captured
+# memory and downstream semantic extraction). recall.py imports this to sanitize the prompt
+# before querying; `_blocks_text` applies it to every transcript block extracted for capture.
+_SYSTEM_REMINDER_RE = re.compile(r"<system-reminder>.*?</system-reminder>", re.DOTALL)
+
+
+def strip_system_reminders(text: str) -> str:
+    text = _SYSTEM_REMINDER_RE.sub("", text or "")
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
 def _blocks_text(content: object) -> str:
     if isinstance(content, str):
-        return content
+        return strip_system_reminders(content)
     if isinstance(content, list):
-        return "\n".join(
+        return strip_system_reminders("\n".join(
             str(b.get("text", "")) for b in content
             if isinstance(b, dict) and b.get("type") == "text" and b.get("text")
-        )
+        ))
     return ""
 
 
@@ -496,18 +519,30 @@ def _tool_use_files(content: object) -> list[str]:
     return paths
 
 
-# ── opt-in code + thinking capture (default OFF) ─────────────────────────────
+# ── body capture: commands/outputs/code default ON, thinking opt-in ──────────
 #
-# Both flags REVERSE the plugin's "never sent" privacy default (code and Claude's private
-# thinking are otherwise stripped), so they are per-install, off unless explicitly enabled, and
-# belong in the documented privacy contract. Enabling either also needs server schema support:
-# RepositoryActivityEvent is extra="forbid", so the `reasoning` / `code_changes` keys emitted by
-# _remember_metadata must exist server-side or every event is rejected. Capture stays prose-only
-# in `content` (the synthesised field); code/thinking ride along as separate, non-synthesised
-# fields so the ingestion budget is untouched.
+# These flags REVERSE the plugin's original "never sent" privacy default. Thinking
+# (VONIC_CAPTURE_THINKING) stays off-by-default: hidden reasoning is not part of the v2
+# coding-agent capture contract. Commands/outputs/code (VONIC_CAPTURE_COMMANDS/OUTPUTS/CODE)
+# default ON as of schema_version 2 — an unset var enables capture; only an explicit falsy value
+# ("0"/"false"/"no"/"off") disables it. Bodies are still redacted (secrets-v1) and capped
+# (docs/CAPTURE_PAYLOAD_V2.md) before they ever reach a persisted buffer. Enabling either also
+# needs server schema support: RepositoryActivityEvent is extra="forbid", so the `reasoning` /
+# `code_changes` keys emitted by _remember_metadata must exist server-side or every event is
+# rejected. Capture stays prose-only in `content` (the synthesised field); code/thinking ride
+# along as separate, non-synthesised fields so the ingestion budget is untouched.
 
 def _flag(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() not in ("", "0", "false", "no", "off")
+
+
+def _flag_default_on(name: str) -> bool:
+    """Same truthy grammar as ``_flag``, but unset means ON. An explicit falsy value
+    ("0"/"false"/"no"/"off") still disables it; only an *unset* var defaults to enabled."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return True
+    return raw.strip().lower() not in ("0", "false", "no", "off")
 
 
 def _capture_thinking() -> bool:
@@ -515,7 +550,55 @@ def _capture_thinking() -> bool:
 
 
 def _capture_code() -> bool:
-    return _flag("VONIC_CAPTURE_CODE")
+    return _flag_default_on("VONIC_CAPTURE_CODE")
+
+
+def _capture_commands() -> bool:
+    return _flag_default_on("VONIC_CAPTURE_COMMANDS")
+
+
+def _capture_outputs() -> bool:
+    return _flag_default_on("VONIC_CAPTURE_OUTPUTS")
+
+
+def _capture_files() -> bool:
+    """Kill switch for file-path evidence. Thinking, code, code-stripping and the repo-activity
+    wire each had one; the paths of edited files did not, even though they are the one category
+    that ships on every turn by default."""
+    return _flag_default_on("VONIC_CAPTURE_FILES")
+
+
+def _repo_relative_files(paths: list | None, cwd: str | None,
+                         toplevels: dict[str, str | None]) -> list[str]:
+    """Reduce a turn's file list to repository-relative paths, dropping anything outside.
+
+    `_tool_use_files` records `file_path` exactly as the tool reported it — an absolute
+    `/home/<name>/…` — and that list reaches the page frontmatter, the page body and the
+    `changed_files` fallback. `_attach_repo_activity` refuses to ship local paths because they
+    leak this machine's directory layout; this list was shipping them anyway, thirty lines away.
+
+    Outside-the-work-tree paths are DROPPED rather than shortened: a relative path invented from
+    an unrelated directory would read as a file in this repository that does not exist.
+    """
+    if not paths or not _capture_files():
+        return []
+    base = cwd or os.getcwd()
+    if base not in toplevels:
+        toplevels[base] = _git(base, "rev-parse", "--show-toplevel")
+    root = toplevels[base]
+    if not root:
+        return []
+    out: list[str] = []
+    for path in paths:
+        if not isinstance(path, str) or not path.strip():
+            continue
+        absolute = path if os.path.isabs(path) else os.path.join(base, path)
+        rel = os.path.relpath(os.path.normpath(absolute), root)
+        if rel.startswith("..") or os.path.isabs(rel):
+            continue
+        if rel not in out:
+            out.append(rel)
+    return out
 
 
 def _thinking_text(content: object) -> str:
@@ -528,37 +611,6 @@ def _thinking_text(content: object) -> str:
     )
 
 
-def _tool_use_edits(content: object) -> list[dict]:
-    """Change bodies from tool_use edit inputs (paths alone are already in _tool_use_files):
-    [{path, before?, after?, content?, edits?}]."""
-    edits: list[dict] = []
-    if not isinstance(content, list):
-        return edits
-    for b in content:
-        if not (isinstance(b, dict) and b.get("type") == "tool_use"
-                and b.get("name") in _EDIT_TOOLS):
-            continue
-        inp = b.get("input") or {}
-        path = inp.get("file_path") or inp.get("path") or inp.get("notebook_path")
-        if not path:
-            continue
-        rec: dict = {"path": str(path)}
-        if inp.get("old_string") is not None or inp.get("new_string") is not None:   # Edit
-            rec["before"] = str(inp.get("old_string", ""))
-            rec["after"] = str(inp.get("new_string", ""))
-        elif isinstance(inp.get("edits"), list):                                     # MultiEdit
-            rec["edits"] = [
-                {"before": str(e.get("old_string", "")), "after": str(e.get("new_string", ""))}
-                for e in inp["edits"] if isinstance(e, dict)
-            ]
-        elif inp.get("content") is not None:                                         # Write / Create
-            rec["content"] = str(inp["content"])
-        elif inp.get("new_source") is not None:                                      # NotebookEdit
-            rec["content"] = str(inp["new_source"])
-        edits.append(rec)
-    return edits
-
-
 def _fenced_code(text: str) -> list[dict]:
     """Fenced code blocks pulled from assistant prose: [{language, text}]."""
     out = []
@@ -569,15 +621,190 @@ def _fenced_code(text: str) -> list[dict]:
     return out
 
 
+# ── schema-v2 turn evidence from a Claude Code transcript ────────────────────
+#
+# The adapter half of the v2 contract: reduce Claude's native `tool_use` / `tool_result` blocks to
+# the SAME normalized turn shape the deliver-session adapters pipe in (tool_events + file_ops +
+# code_edits), so `_capture_payload` builds identical capture_context / codecollab.turn_evidence
+# for every runtime. Everything below is an ALLOW-LIST: a tool nobody has classified contributes
+# its name, category, timing and (redacted) output, never its arguments or argument-derived paths.
+# Local absolute paths may appear here; repo_activity reduces them to {repo, path} before anything
+# is persisted, exactly as it does for the other adapters.
+
+_READ_TOOLS = {"Read", "NotebookRead"}
+_SEARCH_TOOLS = {"Grep", "Glob"}
+# Tools whose input is understood well enough to lift a path from. Anything else (Task/Agent,
+# AskUserQuestion, ToolSearch, every mcp__* tool) is deliberately absent.
+_PATH_TOOLS = _READ_TOOLS | _SEARCH_TOOLS | _EDIT_TOOLS
+_MODIFY_TOOLS = {"Edit", "MultiEdit", "NotebookEdit", "Update"}
+_CREATE_TOOLS = {"Write", "Create"}
+
+
+def _tool_access(name: str) -> str:
+    """The turn-evidence category for a Claude tool name.
+
+    Matches the shared taxonomy: file reads are `read`, grep/glob are `search`, the edit family is
+    `write`, and Bash plus everything unclassified is `execute` (an unknown tool RAN something —
+    calling it anything softer would understate it)."""
+    if name in _READ_TOOLS:
+        return "read"
+    if name in _SEARCH_TOOLS:
+        return "search"
+    if name in _EDIT_TOOLS:
+        return "write"
+    return "execute"
+
+
+def _tool_paths(name: str, inp: dict) -> list[str]:
+    """Paths referenced by a KNOWN tool's input. Unknown/MCP tools yield none by design."""
+    if name not in _PATH_TOOLS or not isinstance(inp, dict):
+        return []
+    paths = []
+    for key in ("file_path", "notebook_path", "path"):
+        value = inp.get(key)
+        if isinstance(value, str) and value.strip() and value not in paths:
+            paths.append(value)
+    return paths
+
+
+def _argv0_subcommand(command: str) -> tuple[str, str]:
+    """The executable and (optional) subcommand of a shell command line.
+
+    Leading `FOO=bar` assignments are skipped so `GIT_DIR=… git status` still reports `git status`
+    rather than an environment variable. Best-effort identity only — never a parser."""
+    tokens = [t for t in re.split(r"\s+", (command or "").strip()) if t]
+    while tokens and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tokens[0]):
+        tokens.pop(0)
+    if not tokens:
+        return "", ""
+    argv0 = os.path.basename(tokens[0])
+    sub = tokens[1] if len(tokens) > 1 and not tokens[1].startswith("-") else ""
+    return argv0, sub
+
+
+def _tool_input(name: str, inp: dict) -> dict:
+    """Allow-listed input for one Claude tool, keyed by the SHARED field names `_body_input`
+    understands. `path`/`workdir` ride along unlisted so `_event_has_secret_path` can see them;
+    `_body_input` drops them, because concrete paths belong on the indexed skeleton."""
+    if not isinstance(inp, dict):
+        return {}
+    out: dict = {}
+    if name in _PATH_TOOLS and isinstance(inp.get("path"), str):
+        out["path"] = inp["path"]
+    if name in _READ_TOOLS:
+        for key in ("offset", "limit"):
+            if isinstance(inp.get(key), (int, float)) and not isinstance(inp.get(key), bool):
+                out[key] = inp[key]
+    elif name in _SEARCH_TOOLS:
+        if isinstance(inp.get("pattern"), str):
+            out["pattern"] = inp["pattern"]
+        if isinstance(inp.get("glob"), str):
+            out["include"] = inp["glob"]
+    elif name == "WebFetch":
+        if isinstance(inp.get("url"), str):
+            out["url"] = inp["url"]
+    elif isinstance(inp.get("command"), str):        # Bash, and anything else shell-shaped
+        out["command"] = inp["command"]
+        argv0, sub = _argv0_subcommand(inp["command"])
+        if argv0:
+            out["argv0"] = argv0
+        if sub:
+            out["subcommand"] = sub
+    return out
+
+
+def _tool_edits(name: str, inp: dict, ref: int) -> list[dict]:
+    """Edit bodies for one `tool_use`, joined to its skeleton by ``ref``."""
+    if name not in _EDIT_TOOLS or not isinstance(inp, dict):
+        return []
+    path = inp.get("file_path") or inp.get("path") or inp.get("notebook_path")
+    if not path:
+        return []
+    base = {"kind": "patch", "ref": ref, "path": str(path)}
+    if inp.get("old_string") is not None or inp.get("new_string") is not None:      # Edit
+        return [{**base, "before": str(inp.get("old_string", "")),
+                 "after": str(inp.get("new_string", ""))}]
+    if isinstance(inp.get("edits"), list):                                          # MultiEdit
+        return [{**base, "before": str(e.get("old_string", "")),
+                 "after": str(e.get("new_string", ""))}
+                for e in inp["edits"] if isinstance(e, dict)]
+    if inp.get("content") is not None:                                              # Write/Create
+        return [{**base, "text": str(inp["content"])}]
+    if inp.get("new_source") is not None:                                           # NotebookEdit
+        return [{**base, "text": str(inp["new_source"])}]
+    return [base]
+
+
+def _result_text(block: dict) -> str:
+    """The text a `tool_result` block showed the model, for either content shape."""
+    content = block.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(str(b.get("text", "")) for b in content
+                         if isinstance(b, dict) and b.get("type") == "text")
+    return ""
+
+
+def _patch_counts(result: object) -> tuple[int, int]:
+    """(additions, deletions) from a tool result's `structuredPatch`.
+
+    Counts only — the hunk text itself is body evidence that already arrived through the tool's
+    own input, so it is not read a second time from the result."""
+    additions = deletions = 0
+    if not isinstance(result, dict):
+        return 0, 0
+    for hunk in result.get("structuredPatch") or []:
+        if not isinstance(hunk, dict):
+            continue
+        for line in hunk.get("lines") or []:
+            if isinstance(line, str) and line[:1] == "+":
+                additions += 1
+            elif isinstance(line, str) and line[:1] == "-":
+                deletions += 1
+    return additions, deletions
+
+
 # Best-effort secret scrub for the opt-in payloads. Not a guarantee — defense-in-depth on data
 # the privacy default would otherwise never send.
 _REDACTORS = (
     (re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"), "«redacted-token»"),
     (re.compile(r"sk-[A-Za-z0-9]{20,}"), "«redacted-token»"),
     (re.compile(r"eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+"), "«redacted-jwt»"),
-    (re.compile(r"(?i)\b(api[_-]?key|secret|token|password|passwd|authorization|bearer)\b"
-                r"(\s*[:=]\s*)['\"]?[^\s'\"]{6,}['\"]?"), r"\1\2«redacted»"),
+    (re.compile(r"(?im)(Authorization\s*:\s*(?:Bearer|Basic|Token)\s+)"
+                r"(?:(['\"])[^\r\n]*?\2|[^\s'\"]+)"),
+     r"\1«redacted»"),
+    (re.compile(r"(?im)(Authorization\s*:\s*)"
+                r"(?:(['\"])[^\r\n]*?\2|[^\s'\"]+)"),
+     r"\1«redacted»"),
+    (re.compile(r"(?i)(https?://)[^/\s:@]+:[^@/\s]+@"), r"\1«redacted»@"),
+    (re.compile(r"(?i)(--(?:api[-_]?key|access[-_]?token|token|secret|password|passwd|credential)"
+                r"(?:\s+|=))(?:(['\"])[\s\S]*?\2|[^\s]+)"), r"\1«redacted»"),
+    (re.compile(r"(?i)([?&](?:api[-_]?key|access[-_]?token|token|secret|password|credential)=)"
+                r"[^&#\s]+"), r"\1«redacted»"),
+    (re.compile(r"(?i)\b(api[_-]?key|secret|token|password|passwd|authorization|bearer|auth)\b"
+                r"(['\"]?\s*[:=]\s*)['\"]?[^\s'\"]{6,}['\"]?"), r"\1\2«redacted»"),
+    (re.compile(r"(?im)^([A-Z][A-Z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD|PASSWD|CREDENTIAL|PRIVATE)"
+                r"[A-Z0-9_]*\s*=\s*).*$"), r"\1«redacted»"),
+    # No `i` flag here (unlike its neighbours): this heuristic identifies a SHOUTY env-var-style
+    # assignment by case alone, with no keyword requirement. Case-insensitive would make `[A-Z]`
+    # match any letter, turning it into a blanket "any `identifier = value` line" redactor and
+    # mangling ordinary lowercase code (`buf = json.load(...)` -> `buf = «redacted-env»`).
+    (re.compile(r"(?m)^([A-Z][A-Z0-9_]{2,}\s*=\s*)[^\s]+"), r"\1«redacted-env»"),
+    (re.compile(r"(?i)\b([A-Za-z][A-Za-z0-9_-]*(?:token|key|secret|password|passwd|credential)"
+                r"[A-Za-z0-9_-]*)(\s*[:=]\s*)(?:(['\"])[\s\S]*?\3|[^\s'\"]+)"),
+     r"\1\2«redacted»"),
+    (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "«redacted-aws-key»"),
+    (re.compile(r"-----BEGIN [^-\n]*PRIVATE KEY-----[\s\S]*?-----END [^-\n]*PRIVATE KEY-----"),
+     "«redacted-private-key»"),
 )
+
+_SECRET_PATH_GLOBS = (
+    ".env", ".env.*", "*secret*", "*.pem", "*.key", "id_rsa*", "credentials*",
+    ".npmrc", ".netrc", ".pypirc", ".dockerconfigjson", ".git-credentials",
+)
+
+_SECRET_PATH_SUFFIXES = (".docker/config.json",)
 
 
 def _redact(text: str) -> str:
@@ -586,32 +813,190 @@ def _redact(text: str) -> str:
     return text
 
 
+def _redact_text(text: str) -> str:
+    """Redact secrets and local home-directory identity before a body can be persisted."""
+    text = _redact(str(text)).replace(os.path.expanduser("~"), "~")
+    return "".join(ch for ch in text if ch in "\n\r\t" or ord(ch) >= 32)
+
+
+def _secret_path(path: object) -> bool:
+    if not isinstance(path, str) or not path.strip():
+        return False
+    normalized = path.strip().replace("\\", "/").lower()
+    name = os.path.basename(normalized)
+    return (any(fnmatch.fnmatch(name, pattern) for pattern in _SECRET_PATH_GLOBS)
+            or any(normalized == suffix or normalized.endswith("/" + suffix)
+                   for suffix in _SECRET_PATH_SUFFIXES))
+
+
+def _event_has_secret_path(event: dict) -> bool:
+    if any(_secret_path(path) for path in event.get("paths", []) or []):
+        return True
+    inp = event.get("input") or {}
+    if isinstance(inp, dict) and any(_secret_path(inp.get(key)) for key in ("path", "workdir")):
+        return True
+    command = inp.get("command", "") if isinstance(inp, dict) else ""
+    if isinstance(command, str):
+        tokens = re.findall(r"(?:^|[\s'\"])([^\s'\";|&]+)", command)
+        candidates = [token for token in tokens
+                      if "/" in token or token.startswith(".")
+                      or os.path.basename(token).lower() in {".env", "credentials"}
+                      or "." in os.path.basename(token)
+                      or os.path.splitext(token)[1].lower() in {".pem", ".key"}]
+        if any(_secret_path(token) for token in candidates):
+            return True
+    return False
+
+
+def _head_tail(text: str, head_bytes: int, tail_bytes: int) -> dict:
+    """Return a UTF-8-safe bounded text field with explicit fidelity metadata."""
+    text = _redact_text(text)
+    raw = text.encode("utf-8")
+    total = len(raw)
+    budget = max(1, head_bytes + tail_bytes)
+    if total <= budget:
+        return {"text": text, "bytes": total, "truncated": False}
+
+    def decode_prefix(data: bytes, limit: int) -> str:
+        return data[:limit].decode("utf-8", errors="ignore")
+
+    def decode_suffix(data: bytes, limit: int) -> str:
+        return data[-limit:].decode("utf-8", errors="ignore") if limit > 0 else ""
+
+    ratio = head_bytes / max(1, head_bytes + tail_bytes)
+    omitted = max(0, total - budget)
+    for _ in range(3):
+        marker = f"\n…[elided {omitted} bytes]\n"
+        if len(marker.encode("utf-8")) > budget:
+            value = decode_prefix(raw, budget)
+            return {"text": value, "bytes": total, "truncated": True}
+        body_budget = max(0, budget - len(marker.encode("utf-8")))
+        kept_head = min(head_bytes, int(body_budget * ratio))
+        kept_tail = min(tail_bytes, body_budget - kept_head)
+        omitted = total - kept_head - kept_tail
+    marker = f"\n…[elided {omitted} bytes]\n"
+    value = (decode_prefix(raw, kept_head)
+             + marker
+             + decode_suffix(raw, kept_tail))
+    return {"text": value, "bytes": total, "truncated": True}
+
+
+def _json_bytes(value: object) -> int:
+    return len(json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+
+
 def _cap(text: str, n: int) -> str:
     return text if len(text) <= n else text[:n] + "\n[truncated]"
 
 
-def _redact_edit(rec: dict) -> dict:
-    return {k: (_redact(v) if k in ("before", "after", "content", "text") and isinstance(v, str) else v)
-            for k, v in rec.items()}
+def _new_turn(line: dict, user_text: str) -> dict:
+    # `cwd` rides on every transcript line; keep the turn's own so scope is per-turn,
+    # not one directory for the whole session (a session can span several repos).
+    turn = {"user": user_text, "assistant": [], "files": [],
+            "thinking": [], "code_edits": [], "cwd": line.get("cwd"),
+            "tool_events": [], "file_ops": [], "source_message_ids": [],
+            "turn_meta": {}, "excluded": _is_login_command(user_text)}
+    uid = line.get("uuid")
+    if isinstance(uid, str) and uid:
+        turn["source_message_ids"].append(uid)
+    ts = line.get("timestamp")
+    if isinstance(ts, str) and ts:
+        turn["turn_meta"]["started_at"] = ts
+    return turn
 
 
-def _prep_code(edits: list[dict], assistant_raw: str) -> list[dict]:
-    """Merge tool-input edits + prose fences, redact, and cap the per-turn code budget so one huge
-    diff can't bloat a turn."""
-    items = [_redact_edit(e) for e in edits] + [_redact_edit(c) for c in _fenced_code(assistant_raw)]
-    cap = _env_int("VONIC_MAX_CODE", 40_000)
-    out, spent = [], 0
-    for it in items:
-        size = sum(len(str(v)) for k, v in it.items() if k != "path")
-        if cap > 0 and spent + size > cap:
-            break
-        out.append(it)
-        spent += size
-    return out
+def _absorb_tool_uses(turn: dict, pending: dict, line: dict, content: object) -> None:
+    """Index every `tool_use` block in one assistant envelope onto the turn.
+
+    `order` is turn-local and monotonic: it is the join key `capture_context.tool_events[].order`
+    and `code_changes.*.ref` share, so it must stay stable across envelopes within a turn."""
+    if not isinstance(content, list):
+        return
+    ts = line.get("timestamp") if isinstance(line.get("timestamp"), str) else None
+    for block in content:
+        if not (isinstance(block, dict) and block.get("type") == "tool_use"):
+            continue
+        name = str(block.get("name") or "")
+        if not name:
+            continue
+        inp = block.get("input") if isinstance(block.get("input"), dict) else {}
+        order = len(turn["tool_events"])
+        event: dict = {"order": order, "tool": name, "access": _tool_access(name),
+                       "status": "completed"}
+        if ts:
+            event["started_at"] = ts
+        # VONIC_CAPTURE_FILES=0 means no file-path evidence at all: not the always-sent `files`
+        # list, and not the structured path refs either. The tool skeleton itself survives — that
+        # a Read ran is not a path — so the turn index stays useful with paths switched off.
+        paths = _tool_paths(name, inp) if _capture_files() else []
+        if paths:
+            event["paths"] = paths
+        # The raw input carries `path`/`workdir`/`command` for secret-path detection; only the
+        # allow-listed subset survives `_body_input`, and only when commands capture is enabled.
+        raw_input = _tool_input(name, inp)
+        if raw_input:
+            event["input"] = raw_input
+        turn["tool_events"].append(event)
+
+        # A read is a file operation too — it is what fills capture_context.files_read.
+        for path in paths if name in _READ_TOOLS else []:
+            turn["file_ops"].append({"op": "read", "path": path})
+        if name in _EDIT_TOOLS and paths:
+            op = "created" if name in _CREATE_TOOLS else "modified"
+            turn["file_ops"].append({"op": op, "path": paths[0]})
+        if _capture_code():
+            turn["code_edits"].extend(_tool_edits(name, inp, order))
+        tool_id = block.get("id")
+        if isinstance(tool_id, str) and tool_id:
+            pending[tool_id] = event
 
 
-def _parse_session(transcript_path: str) -> list[dict]:
-    """Return ordered turns: [{user, assistant, files}]."""
+def _absorb_tool_results(turn: dict, pending: dict, line: dict, content: object) -> None:
+    """Attach `tool_result` outcomes to the tool_use blocks they answer.
+
+    Claude carries tool output on a USER line, which is why this runs for every user line —
+    including one that also carries text and therefore starts the NEXT turn. Harvesting only on
+    turn-continuation lines silently dropped the final tool's output of every turn."""
+    if not isinstance(content, list):
+        return
+    ts = line.get("timestamp") if isinstance(line.get("timestamp"), str) else None
+    result = line.get("toolUseResult")
+    for block in content:
+        if not (isinstance(block, dict) and block.get("type") == "tool_result"):
+            continue
+        event = pending.get(block.get("tool_use_id"))
+        if event is None:
+            continue
+        if block.get("is_error"):
+            event["status"] = "error"
+            turn["turn_meta"]["status"] = "error"
+        if ts:
+            event["completed_at"] = ts
+        text = _result_text(block)
+        if text and _capture_outputs():
+            event["output"] = text
+        # Deterministic diff stats + created-vs-modified, taken from the result's own metadata
+        # rather than guessed from the tool name. Counts only; no file body is read here.
+        additions, deletions = _patch_counts(result)
+        path = (event.get("paths") or [None])[0]
+        if path and (additions or deletions or isinstance(result, dict)):
+            for op in turn["file_ops"]:
+                if op.get("path") != path or op.get("op") == "read":
+                    continue
+                if additions or deletions:
+                    op["additions"], op["deletions"] = additions, deletions
+                if (event.get("tool") in _CREATE_TOOLS and isinstance(result, dict)
+                        and result.get("originalFile") is not None):
+                    op["op"] = "modified"   # Write over an existing file is not a creation
+                break
+
+
+def _parse_session(transcript_path: str, default_cwd: str | None = None) -> list[dict]:
+    """Return ordered turns carrying schema-v2 evidence.
+
+    Shape: {user, assistant, files, thinking, cwd, tool_events, file_ops, code_edits,
+    source_message_ids, turn_meta}. Paths are still LOCAL here; repo_activity reduces them to
+    {repo, path} before persistence."""
     try:
         with open(transcript_path, encoding="utf-8") as fh:
             raw_lines = fh.readlines()
@@ -620,6 +1005,7 @@ def _parse_session(transcript_path: str) -> list[dict]:
         return []
     turns: list[dict] = []
     cur: dict | None = None
+    pending: dict = {}
     for raw in raw_lines:
         raw = raw.strip()
         if not raw:
@@ -629,21 +1015,27 @@ def _parse_session(transcript_path: str) -> list[dict]:
         except json.JSONDecodeError:
             continue
         content = line.get("message", {}).get("content")
+        # Results FIRST: they answer the turn that is still current, even on the line that is
+        # about to start the next one.
+        if line.get("type") == "user" and cur is not None:
+            _absorb_tool_results(cur, pending, line, content)
         if _is_human_prompt(line):
             if cur:
                 turns.append(cur)
-            # `cwd` rides on every transcript line; keep the turn's own so scope is per-turn,
-            # not one directory for the whole session (a session can span several repos).
-            user_text = _blocks_text(content)
-            cur = {"user": user_text, "assistant": [], "files": [],
-                   "thinking": [], "code": [], "cwd": line.get("cwd"),
-                   "excluded": _is_login_command(user_text)}
+            cur = _new_turn(line, _blocks_text(content))
+            pending = {}
         elif line.get("type") == "assistant" and cur is not None:
             if cur.get("cwd") is None:
                 cur["cwd"] = line.get("cwd")   # human prompt lacked one; use the reply's
             txt = _blocks_text(content)
             if txt:
                 cur["assistant"].append(txt)
+                # Event identity material: the user message plus the prose-bearing assistant
+                # envelopes. `message.id` is server-issued and survives a transcript rewrite;
+                # the per-line uuid is the fallback.
+                ident = (line.get("message") or {}).get("id") or line.get("uuid")
+                if isinstance(ident, str) and ident and ident not in cur["source_message_ids"]:
+                    cur["source_message_ids"].append(ident)
             for p in _tool_use_files(content):
                 if p not in cur["files"]:
                     cur["files"].append(p)
@@ -651,14 +1043,20 @@ def _parse_session(transcript_path: str) -> list[dict]:
                 th = _thinking_text(content)
                 if th:
                     cur["thinking"].append(th)
-            if _capture_code():
-                cur["code"].extend(_tool_use_edits(content))
+            _absorb_tool_uses(cur, pending, line, content)
+            ts = line.get("timestamp")
+            if isinstance(ts, str) and ts:
+                cur["turn_meta"]["completed_at"] = ts
     if cur:
         turns.append(cur)
     turns = [t for t in turns if not t.pop("excluded", False)]
+    toplevels: dict[str, str | None] = {}
     for t in turns:
         t["assistant"] = "\n".join(t["assistant"]).strip()
         t["thinking"] = "\n\n".join(t.get("thinking", [])).strip()
+        t["turn_meta"].setdefault("status", "completed")
+        # One site, so backfill gets it too: backfill.py calls _parse_session.
+        t["files"] = _repo_relative_files(t.get("files"), t.get("cwd") or default_cwd, toplevels)
     return turns
 
 
@@ -895,7 +1293,17 @@ _EVENT_TYPES = {
 _MAX_EVENT_CONTENT = 100_000   # RepositoryActivityEvent.content max_length
 _MAX_CHANGED_FILES = 1_000     # RepositoryActivityEvent.changed_files max_length
 _MAX_PATH = 1_024              # ChangedFile.path max_length
-_MAX_REPOS_TOUCHED = 50        # metadata bag is unbounded server-side; bound it here anyway
+_MAX_REPOS_TOUCHED = 50        # bounded below the server metadata-object byte cap
+_MAX_CONTEXT_BYTES = 24_000    # capture_context budget, leaving headroom under the 32 KiB bag cap
+_MAX_COMMAND_BYTES = 2_000
+_MAX_OUTPUT_BYTES = 8_000
+_MAX_PATCH_BYTES = 16_000
+_MAX_EVIDENCE_BYTES = 90_000
+
+
+def _body_cap(name: str, hard_max: int) -> int:
+    """Config may tighten a body cap, never disable or raise its hard privacy/storage ceiling."""
+    return max(1, min(_env_int(name, hard_max), hard_max))
 
 
 def _event_type(turn: dict) -> tuple[str, str | None]:
@@ -957,13 +1365,12 @@ def _remember_metadata(buf: dict, turn: dict, repo: str, branch: str, author: st
     ``event_id`` is the server's idempotency key: it stores ``(tenant, event_id)`` once and
     compares a content hash on re-delivery. Re-sending identical content is a harmless
     ``duplicate``, but the SAME id carrying DIFFERENT content is a hard ``conflict`` that raises.
-    ``session:seq`` is stable per turn and a turn's text never changes after capture, so a delivery
-    retried after a failure dedups instead of erroring — which is also why each turn is its own
-    event rather than the whole session being re-sent under one id every time.
+    V2 turns use immutable client source message IDs. Buffers written before v2 retain their
+    legacy ``session:seq`` ID exactly, so retries cannot conflict with accepted legacy events.
     """
     event_type, other_type = _event_type(turn)
     event = {
-        "event_id": f"{buf.get('session_id', 'session')}:{turn.get('seq', 0)}"[:128],
+        "event_id": _event_id(buf, turn),
         "event_type": event_type,
         "repo_name": repo,
         "branch_name": branch,
@@ -981,11 +1388,20 @@ def _remember_metadata(buf: dict, turn: dict, repo: str, branch: str, author: st
                  or os.environ.get("VONIC_USER_ID", "").strip())
     if author_id:
         event["author_id"] = author_id
-    files = [str(f)[:_MAX_PATH] for f in turn.get("files", []) if f][:_MAX_CHANGED_FILES]
-    if files:
-        # additions/deletions are not captured (the plugin never reads diffs); the server
-        # defaults them to 0 and `status` stays unset rather than guessed.
-        event["changed_files"] = [{"path": f} for f in files]
+    changed = turn.get("changed_files")
+    if isinstance(changed, list) and changed:
+        event["changed_files"] = changed[:_MAX_CHANGED_FILES]
+    else:
+        # Fallback for turns whose paths were never resolved (legacy buffers, adapters that send
+        # only `files`). A structural wire path MUST be repository-relative: an absolute one is
+        # this machine's directory layout, and a `..` escape is not in the event's repo at all.
+        # The resolver drops such paths deliberately — dropping them here too stops the fallback
+        # from re-introducing exactly what it dropped (e.g. a file outside any work tree).
+        files = [str(f)[:_MAX_PATH] for f in turn.get("files", []) if f
+                 and not os.path.isabs(str(f))
+                 and not str(f).startswith("..")][:_MAX_CHANGED_FILES]
+        if files:
+            event["changed_files"] = [{"path": f} for f in files]
     # Free-form bag: the session linkage that used to live in the page frontmatter.
     #
     # `client_version` is the build that CAPTURED the turn, not the one delivering it — a buffer
@@ -995,12 +1411,57 @@ def _remember_metadata(buf: dict, turn: dict, repo: str, branch: str, author: st
     event["metadata"] = {
         "session_id": buf.get("session_id", ""),
         "turn_index": turn.get("seq", 0),
+        "event_id_version": turn.get("event_id_version", 1),
+        "event_id_source": (
+            "message_ids" if turn.get("event_id_version") == 2 and turn.get("source_message_ids")
+            else "fallback" if turn.get("event_id_version") == 2 else "legacy_sequence"
+        ),
+        "source_message_id_count": len(turn.get("source_message_ids", []) or []),
         "client": buf.get("client", ""),
         "client_version": buf.get("plugin_version") or _plugin_version(),
         "project": buf.get("project", ""),
     }
     _attach_repo_activity(event["metadata"], turn)
     return {"event": event}
+
+
+def _event_id(buf: dict, turn: dict) -> str:
+    """Return the persisted repository-event identity for one buffered turn.
+
+    V2 IDs derive from immutable client message IDs instead of normalized turn positions. The
+    chosen ID is saved on the buffered turn before delivery, so a retry is unaffected by future
+    normalizer changes. Buffers without a v2 marker preserve their legacy ``session:seq`` IDs.
+
+    The kind is namespaced by the buffer's own client tag (``cc-v2``, ``oc-v2``, ``cx-v2``) rather
+    than a literal: this file is ONE shared deliverer vendored into every runtime, so a hardcoded
+    runtime name here would stamp Claude Code turns with another adapter's namespace. Tag ``oc``
+    still yields exactly ``oc-v2``, so no already-delivered OpenCode identity moves.
+    """
+    existing = turn.get("event_id")
+    if isinstance(existing, str) and existing:
+        return existing[:128]
+    session_id = str(buf.get("session_id", "session"))
+    if turn.get("event_id_version") != 2:
+        return f"{session_id}:{turn.get('seq', 0)}"[:128]
+    source_ids = [str(item) for item in turn.get("source_message_ids", [])
+                  if isinstance(item, str) and item]
+    material = {"source_message_ids": source_ids} if source_ids else {
+        "seq": turn.get("seq", 0),
+        "ts": turn.get("ts"),
+        "user": turn.get("user"),
+        "assistant": turn.get("assistant"),
+    }
+    digest = hashlib.sha256(
+        json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:24]
+    # Same resolution order `_record_session` uses to stamp the buffer in the first place, so a
+    # buffer that predates the field still identifies as the runtime that is reading it rather
+    # than defaulting to another adapter's namespace.
+    tag = str(buf.get("client_tag") or os.environ.get("VONIC_CODECOLLAB_CLIENT_TAG") or "cc")
+    kind = f"{tag}-v2" if source_ids else f"{tag}-v2-fallback"
+    event_id = f"{session_id}:{kind}:{digest}"[:128]
+    turn["event_id"] = event_id
+    return event_id
 
 
 def _attach_repo_activity(bag: dict, turn: dict) -> None:
@@ -1016,9 +1477,15 @@ def _attach_repo_activity(bag: dict, turn: dict) -> None:
     machine's directory layout for checkouts this event is not even scoped to. Read-only paths do
     not, and must not, reach ``changed_files`` — that list still comes from ``turn["files"]``.
 
-    ``VONIC_REPO_ACTIVITY_WIRE=0`` is the kill switch. It is deliberately its own flag: 0.12.0's
-    root cause was one boolean guarding two payload extensions with opposite compatibility.
+    ``VONIC_REPO_ACTIVITY_WIRE=0`` is the kill switch for ``repositories_touched``. It is deliberately
+    its own flag: 0.12.0's root cause was one boolean guarding two payload extensions with opposite
+    compatibility. ``capture_context`` (CMEM-support evidence) is likewise attached under its own
+    ``VONIC_CAPTURE_CONTEXT`` flag — set at record time in ``_capture_context`` — and is independent
+    of this switch.
     """
+    context = turn.get("capture_context")
+    if isinstance(context, dict) and context:
+        bag["capture_context"] = context
     if os.environ.get("VONIC_REPO_ACTIVITY_WIRE", "1") == "0":
         return
     activity = turn.get("repos") or {}
@@ -1032,6 +1499,355 @@ def _attach_repo_activity(bag: dict, turn: dict) -> None:
         bag["repositories_touched"] = entries
     if activity.get("unresolved_paths"):
         bag["unresolved_path_count"] = activity["unresolved_paths"]
+
+
+def _origin_slug(cwd: str) -> str | None:
+    """The ``org/repo`` slug ONLY when it is deterministically derived from a git ``origin`` remote.
+    Falls back to nothing (not the directory name), so ``repo_remote`` stays a real remote identity
+    while ``repo_root`` may still degrade to the folder name."""
+    if not _git(cwd, "remote", "get-url", "origin"):
+        return None
+    return _repo_slug(cwd)   # origin present -> _repo_slug returns the origin-derived slug
+
+
+def _bounded_context(ctx: dict) -> dict:
+    """Keep the encoded capture_context under budget, trimming the largest evidence first and
+    flagging the trim. The metadata bag as a whole is hard-capped server-side (32 KiB); this leaves
+    room for the identity/session keys that share the bag."""
+    if _json_bytes(ctx) <= _MAX_CONTEXT_BYTES:
+        return ctx
+    ctx = dict(ctx)
+    events = ctx.get("tool_events")
+    if isinstance(events, list) and events:
+        keep = max(1, len(events) // 4)
+        ctx["tool_events"] = events[:keep] + events[-keep:]
+        existing = ctx.get("truncated")
+        report = dict(existing) if isinstance(existing, dict) else {}
+        report["events_dropped"] = report.get("events_dropped", 0) + max(0, len(events) - 2 * keep)
+        ctx["truncated"] = report
+        if _json_bytes(ctx) <= _MAX_CONTEXT_BYTES:
+            return ctx
+    buckets = ("files_read", "files_modified", "files_created", "files_deleted")
+    original_counts = {bucket: len(ctx.get(bucket, [])) for bucket in buckets
+                       if isinstance(ctx.get(bucket), list)}
+    for bucket in buckets:
+        if _json_bytes(ctx) <= _MAX_CONTEXT_BYTES:
+            break
+        if isinstance(ctx.get(bucket), list):
+            original = len(ctx[bucket])
+            ctx[bucket] = ctx[bucket][:50]
+            ctx.setdefault("truncated", {})[f"{bucket}_dropped"] = max(0, original - 50)
+    if _json_bytes(ctx) > _MAX_CONTEXT_BYTES and "tool_events" in ctx:
+        del ctx["tool_events"]
+        ctx.setdefault("truncated", {})["events_dropped"] = len(events or [])
+    while _json_bytes(ctx) > _MAX_CONTEXT_BYTES:
+        candidates = [bucket for bucket in buckets
+                      if isinstance(ctx.get(bucket), list) and ctx[bucket]]
+        if not candidates:
+            break
+        bucket = max(candidates, key=lambda key: _json_bytes(ctx[key]))
+        keep = len(ctx[bucket]) // 2
+        if keep:
+            ctx[bucket] = ctx[bucket][:keep]
+        else:
+            del ctx[bucket]
+        ctx.setdefault("truncated", {})[f"{bucket}_dropped"] = original_counts[bucket] - keep
+    if _json_bytes(ctx) > _MAX_CONTEXT_BYTES:
+        return {"schema_version": ctx.get("schema_version", 2),
+                "truncated": {"context_dropped": True}}
+    return ctx
+
+
+def _capture_context(resolved: dict | None, git: dict, turn: dict,
+                     repo_remote: str | None) -> dict | None:
+    """Assemble one turn's ``capture_context`` — deterministic CMEM-support evidence for the free-form
+    metadata bag. Combines the resolved repo-relative paths (``resolved``) with the turn's git
+    identity and completion metadata. Returns ``None`` (nothing attached) when the flag is off or the
+    turn carries no structured evidence beyond the schema marker.
+
+    ``VONIC_CAPTURE_CONTEXT=0`` is the kill switch — its own flag, never folded into another, so it
+    can be disabled independently of ``repositories_touched`` (the v0.12.0 lesson).
+    """
+    if os.environ.get("VONIC_CAPTURE_CONTEXT", "1") == "0":
+        return None
+    ctx: dict = {"schema_version": 2}
+    # Only copy known evidence keys — never trust the resolver's shape blindly (a stubbed or
+    # unexpected return must not smuggle local paths into the bag).
+    if isinstance(resolved, dict):
+        for key in ("tool_events", "files_read", "files_modified", "files_created", "files_deleted"):
+            value = resolved.get(key)
+            if isinstance(value, list) and value:
+                ctx[key] = value
+        symbols = resolved.get("mentioned_symbols")
+        if _capture_code() and isinstance(symbols, list) and symbols:
+            ctx["mentioned_symbols"] = symbols[:100]
+
+    events = ctx.get("tool_events")
+    if isinstance(events, list) and events:
+        by_tool: dict[str, int] = {}
+        by_access: dict[str, int] = {}
+        completed = errors = 0
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            tool = str(event.get("tool") or "unknown")[:_MAX_PATH]
+            access = str(event.get("access") or "unknown")[:_MAX_PATH]
+            by_tool[tool] = by_tool.get(tool, 0) + 1
+            by_access[access] = by_access.get(access, 0) + 1
+            if event.get("status") == "error":
+                errors += 1
+            elif event.get("status") == "completed":
+                completed += 1
+        ctx["tool_summary"] = {
+            "total": sum(by_tool.values()), "by_tool": by_tool, "by_access": by_access,
+            "completed": completed, "errors": errors,
+        }
+
+    repository: dict = {}
+    if git.get("repo"):
+        repository["repo_root"] = git["repo"]        # canonical id (origin slug or dir name)
+    if repo_remote:
+        repository["repo_remote"] = repo_remote      # only when a real origin exists
+    if git.get("branch"):
+        repository["branch"] = git["branch"]
+    if git.get("commit"):
+        repository["head_commit"] = git["commit"]
+    if repository:
+        ctx["repository"] = repository
+
+    meta = turn.get("turn_meta")
+    if isinstance(meta, dict):
+        turn_meta: dict = {}
+        for key in ("started_at", "completed_at", "status"):
+            value = meta.get(key)
+            if isinstance(value, str) and value.strip():
+                turn_meta[key] = value[:_MAX_PATH]
+        if turn_meta:
+            ctx["turn"] = turn_meta
+
+    if len(ctx) == 1:   # schema_version only — no real evidence to carry
+        return None
+    return _bounded_context(ctx)
+
+
+def _body_input(event: dict) -> dict:
+    """Allow-listed non-path input fields; paths already live on the indexed tool skeleton."""
+    if not _capture_commands():
+        return {}
+    raw = event.get("input") or {}
+    if not isinstance(raw, dict):
+        return {}
+    out: dict = {}
+    if isinstance(raw.get("command"), str):
+        out["command"] = _head_tail(raw["command"],
+                                    _body_cap("VONIC_MAX_COMMAND", _MAX_COMMAND_BYTES), 0)
+    for key in ("pattern", "include", "url", "argv0", "subcommand"):
+        if isinstance(raw.get(key), str):
+            out[key] = _head_tail(raw[key], _body_cap("VONIC_MAX_COMMAND", _MAX_COMMAND_BYTES), 0)
+    for key in ("offset", "limit"):
+        if isinstance(raw.get(key), (int, float)):
+            out[key] = raw[key]
+    return out
+
+
+def _resolved_changed_files(resolved: dict | None, repo: str) -> list[dict]:
+    """Top-level ChangedFile rows for the ambient repository only."""
+    if not isinstance(resolved, dict):
+        return []
+    rows: list[dict] = []
+    for item in resolved.get("changed_files") or []:
+        if not isinstance(item, dict) or item.get("repo") != repo:
+            continue
+        path = item.get("path")
+        status = item.get("status")
+        if not isinstance(path, str) or not path:
+            continue
+        row = {"path": path[:_MAX_PATH]}
+        if isinstance(status, str) and status:
+            row["status"] = status[:32]
+        if _capture_code():
+            row["additions"] = max(0, int(item.get("additions") or 0))
+            row["deletions"] = max(0, int(item.get("deletions") or 0))
+        rows.append(row)
+    return rows[:_MAX_CHANGED_FILES]
+
+
+def _capture_bodies(resolved: dict, turn: dict) -> tuple[dict | None, dict]:
+    """Build redacted/capped bodies for structured ``code_changes`` plus one truncation report.
+
+    Raw normalized bodies enter here but never leave: this function runs before buffer persistence.
+    The compact capture_context retains the body-free tool skeleton; ``ref`` joins both objects.
+    """
+    raw_events = turn.get("tool_events") or []
+    indexed = {event.get("order"): event for event in resolved.get("tool_events", [])
+               if isinstance(event, dict)}
+    report = {"outputs_trimmed": 0, "bodies_dropped": 0, "bytes_dropped": 0}
+    bodies: list[dict] = []
+    for event in raw_events:
+        if not isinstance(event, dict) or event.get("order") not in indexed:
+            continue
+        ref = event["order"]
+        skeleton = indexed[ref]
+        body: dict = {"ref": ref, "tool": skeleton.get("tool", "")}
+        inp = _body_input(event)
+        if inp:
+            body["input"] = inp
+        output = event.get("output")
+        if _capture_outputs() and isinstance(output, str):
+            if _event_has_secret_path(event):
+                report["bodies_dropped"] += 1
+                report["bytes_dropped"] += len(output.encode("utf-8"))
+                body["output"] = {"withheld": "sensitive_path"}
+            else:
+                output_cap = _body_cap("VONIC_MAX_OUTPUT", _MAX_OUTPUT_BYTES)
+                wrapped = _head_tail(output, max(0, output_cap * 5 // 8),
+                                     max(0, output_cap * 3 // 8))
+                if wrapped["truncated"]:
+                    report["outputs_trimmed"] += 1
+                    report["bytes_dropped"] += max(0, wrapped["bytes"] - output_cap)
+                body["output"] = wrapped
+        if len(body) > 2:
+            bodies.append(body)
+
+    edits: list[dict] = []
+    if _capture_code():
+        for edit in turn.get("code_edits") or []:
+            if not isinstance(edit, dict):
+                continue
+            ref = edit.get("ref")
+            if ref is not None and ref not in indexed:
+                continue
+            raw_event = next((event for event in raw_events
+                              if isinstance(event, dict) and event.get("order") == ref), {})
+            if _event_has_secret_path(raw_event) or _secret_path(edit.get("path")):
+                report["bodies_dropped"] += 1
+                continue
+            item: dict = {"kind": edit.get("kind", "patch")}
+            if ref is not None:
+                item["ref"] = ref
+            if isinstance(edit.get("language"), str):
+                item["language"] = edit["language"][:64]
+            refs = indexed.get(ref, {}).get("paths")
+            if isinstance(refs, list) and refs:
+                item["paths"] = refs
+            for key in ("text", "before", "after"):
+                if isinstance(edit.get(key), str):
+                    patch_cap = _body_cap("VONIC_MAX_PATCH", _MAX_PATCH_BYTES)
+                    item[key] = _head_tail(edit[key], max(0, patch_cap * 5 // 8),
+                                           max(0, patch_cap * 3 // 8))
+            edits.append(item)
+
+    if not bodies and not edits:
+        return None, report
+    evidence: dict = {
+        "schema_version": 2,
+        "kind": "codecollab.turn_evidence",
+        "capture_policy": {
+            "commands": "redacted_capped" if _capture_commands() else "off",
+            "outputs": "redacted_capped" if _capture_outputs() else "off",
+            "code": "redacted_capped" if _capture_code() else "off",
+            "reasoning": "off",
+            "redaction": "secrets-v1",
+        },
+    }
+    if bodies:
+        evidence["tool_bodies"] = bodies
+    if edits:
+        evidence["edits"] = edits
+
+    budget = _body_cap("VONIC_MAX_EVIDENCE", _MAX_EVIDENCE_BYTES)
+    if budget > 0 and _json_bytes(evidence) > budget:
+        # First shrink outputs from 8 KiB to roughly 4 KiB, preserving head and tail.
+        for body in bodies:
+            output = body.get("output")
+            if not isinstance(output, dict) or not isinstance(output.get("text"), str):
+                continue
+            smaller = _head_tail(output["text"], 2_500, 1_500)
+            smaller["bytes"] = output.get("bytes", smaller["bytes"])
+            smaller["truncated"] = True
+            report["outputs_trimmed"] += 1
+            report["bytes_dropped"] += max(0, len(output["text"].encode("utf-8"))
+                                             - len(smaller["text"].encode("utf-8")))
+            body["output"] = smaller
+            if _json_bytes(evidence) <= budget:
+                break
+    if budget > 0 and _json_bytes(evidence) > budget:
+        # Successful outputs are lower-value than failures; keep their call/input skeleton.
+        statuses = {event.get("order"): event.get("status") for event in raw_events
+                    if isinstance(event, dict)}
+        for body in bodies:
+            if statuses.get(body["ref"]) == "completed" and isinstance(body.get("output"), dict):
+                output = body.pop("output")
+                report["bodies_dropped"] += 1
+                report["bytes_dropped"] += len(str(output.get("text", "")).encode("utf-8"))
+                if _json_bytes(evidence) <= budget:
+                    break
+    if budget > 0 and _json_bytes(evidence) > budget and bodies:
+        # Preserve setup and conclusion; remove repetitive middle bodies only.
+        while len(bodies) > 2 and _json_bytes(evidence) > budget:
+            bodies.pop(len(bodies) // 2)
+            report["bodies_dropped"] += 1
+    if budget > 0 and _json_bytes(evidence) > budget:
+        # Code has already received its 16 KiB per-field cap; tighten it before dropping edits.
+        for edit in edits:
+            for key in ("text", "before", "after"):
+                field = edit.get(key)
+                if not isinstance(field, dict) or not isinstance(field.get("text"), str):
+                    continue
+                smaller = _head_tail(field["text"], 5_000, 3_000)
+                smaller["bytes"] = field.get("bytes", smaller["bytes"])
+                smaller["truncated"] = True
+                report["bytes_dropped"] += max(0, len(field["text"].encode("utf-8"))
+                                                 - len(smaller["text"].encode("utf-8")))
+                edit[key] = smaller
+                if _json_bytes(evidence) <= budget:
+                    break
+            if _json_bytes(evidence) <= budget:
+                break
+    while budget > 0 and len(edits) > 1 and _json_bytes(evidence) > budget:
+        edits.pop(len(edits) // 2)
+        report["bodies_dropped"] += 1
+    # A caller may configure an unusually small budget. Enforce it even when preserving first/last
+    # is impossible; the complete tool skeleton still survives in capture_context.
+    while budget > 0 and bodies and _json_bytes(evidence) > budget:
+        bodies.pop(len(bodies) // 2)
+        report["bodies_dropped"] += 1
+    while budget > 0 and edits and _json_bytes(evidence) > budget:
+        edits.pop(len(edits) // 2)
+        report["bodies_dropped"] += 1
+    return evidence, report
+
+
+def _capture_payload(resolved: dict | None, git: dict, turn: dict,
+                     repo_remote: str | None) -> tuple[dict | None, dict | None]:
+    """Assemble the split index/body payload with one shared fidelity report."""
+    resolved = resolved if isinstance(resolved, dict) else {}
+    context = _capture_context(resolved, git, turn, repo_remote)
+    if context is None:
+        return None, None
+    evidence, report = _capture_bodies(resolved, turn)
+    if context and any(report.values()):
+        current = context.get("truncated")
+        merged = dict(current) if isinstance(current, dict) else {}
+        for key, value in report.items():
+            if value:
+                merged[key] = merged.get(key, 0) + value
+        context["truncated"] = merged
+        context = _bounded_context(context)
+    if context and evidence:
+        kept_refs = {event.get("order") for event in context.get("tool_events", [])
+                     if isinstance(event, dict)}
+        evidence["tool_bodies"] = [body for body in evidence.get("tool_bodies", [])
+                                   if body.get("ref") in kept_refs]
+        evidence["edits"] = [edit for edit in evidence.get("edits", [])
+                             if edit.get("ref") is None or edit.get("ref") in kept_refs]
+        if not evidence.get("tool_bodies"):
+            evidence.pop("tool_bodies", None)
+        if not evidence.get("edits"):
+            evidence.pop("edits", None)
+        if len(evidence) == 3:  # schema + kind + policy only
+            evidence = None
+    return context, evidence
 
 
 # ── gbrain target resolution ─────────────────────────────────────────────────
@@ -1944,13 +2760,29 @@ def _record_turns(event: dict, done: bool, repos: dict | None = None) -> str | N
     session_id = event.get("session_id", "")
     cwd = event.get("cwd") or os.getcwd()
     path = _buffer_path(session_id)
-    turns = _parse_session(event.get("transcript_path", ""))
+    turns = _parse_session(event.get("transcript_path", ""), cwd)
     # Scope each turn by the directory IT ran in, not one cwd for the whole session. `git`
     # subprocesses stay outside the lock and cost one call per DISTINCT cwd (cached), not per
     # turn — a mixed session has a handful of directories, not hundreds. A turn with no recorded
     # cwd (older transcripts, or a line that carried none) falls back to the event cwd, so live
     # capture and single-directory sessions are unchanged.
     ident_by_cwd = {c: _git_identity(c) for c in {t.get("cwd") or cwd for t in turns}}
+    remote_by_cwd = {c: _origin_slug(c) for c in ident_by_cwd}
+    # CMEM-support evidence: reduce each turn's tool_events + file_ops to repo-relative refs
+    # BEFORE the lock, grouped by the directory the turn ran in so a mixed session resolves each
+    # turn against its own checkout while still sharing one git cache per directory.
+    capture_paths: list[dict] = [{} for _ in turns]
+    groups: dict[str, list[int]] = {}
+    for index, t in enumerate(turns):
+        groups.setdefault(t.get("cwd") or cwd, []).append(index)
+    for group_cwd, indexes in groups.items():
+        subset = [turns[index] for index in indexes]
+        resolved = _repo_activity(
+            lambda mod, c=group_cwd, s=subset: mod.resolve_turn_capture(s, c))
+        if isinstance(resolved, list) and len(resolved) == len(indexes):
+            for slot, index in enumerate(indexes):
+                if isinstance(resolved[slot], dict):
+                    capture_paths[index] = resolved[slot]
     with _locked(path):
         buf = _load_buffer(path) or _new_buffer(session_id, cwd)
         _check_build(buf, session_id)
@@ -1959,23 +2791,52 @@ def _record_turns(event: dict, done: bool, repos: dict | None = None) -> str | N
         for i, t in enumerate(turns[seen:]):
             if not (t.get("user") or t.get("assistant")):
                 continue
+            turn_cwd = t.get("cwd") or cwd
+            git = ident_by_cwd[turn_cwd]
             # `seq` (global turn index) becomes the entry's `source`, keeping the
             # dedup key (page, date, summary, source) unique — otherwise turns
             # whose prompts share an opening (e.g. repeated "yes") would MERGE.
-            buf["turns"].append({
+            entry = {
                 "seq": seen + i,
                 "date": today,
                 "ts": _iso_now(),
-                "git": ident_by_cwd[t.get("cwd") or cwd],   # this turn's own scope; frozen here
+                "git": git,                                 # this turn's own scope; frozen here
                 "user": _clean(t.get("user", "")),
                 "assistant": _clean(t.get("assistant", "")),
                 "files": t.get("files", []),
                 # opt-in, default OFF; redacted + capped, and NEVER folded into `content`
                 "thinking": (_cap(_redact(t.get("thinking", "")), _env_int("VONIC_MAX_THINKING", 20_000))
                              if _capture_thinking() else ""),
-                "code": _prep_code(t.get("code", []), t.get("assistant", "")) if _capture_code() else [],
                 "uploaded": False,
-            })
+            }
+            # V2 identity: Claude's own message ids, so a turn keeps its event_id even if the
+            # parser's turn positions ever shift. Legacy buffers keep session:seq untouched —
+            # `_event_id` only takes this path for turns marked version 2.
+            entry["event_id_version"] = 2
+            source_message_ids = [str(item) for item in t.get("source_message_ids", [])
+                                  if isinstance(item, str) and item]
+            if source_message_ids:
+                entry["source_message_ids"] = source_message_ids
+
+            evidence_turn = dict(t)
+            if _capture_code():
+                code_edits = list(t.get("code_edits") or [])
+                code_edits.extend({"kind": "fence", "language": item.get("language"),
+                                   "text": item.get("text", "")}
+                                  for item in _fenced_code(t.get("assistant", "")))
+                evidence_turn["code_edits"] = code_edits
+            else:
+                evidence_turn["code_edits"] = []
+            context, evidence = _capture_payload(capture_paths[seen + i], git, evidence_turn,
+                                                 remote_by_cwd.get(turn_cwd))
+            changed_files = _resolved_changed_files(capture_paths[seen + i], git.get("repo", ""))
+            if changed_files:
+                entry["changed_files"] = changed_files
+            if context:
+                entry["capture_context"] = context
+            if evidence:
+                entry["code"] = evidence
+            buf["turns"].append(entry)
         # One `turn` run can record several turns (a resume replays the backlog), but the report
         # covers activity since the LAST UserPromptSubmit — so it belongs to the last turn only.
         # It has to be in the buffer before `_dispatch`, which delivers from a separate process.
@@ -2010,11 +2871,30 @@ def _record_session(session: dict, done: bool) -> str | None:
     incoming = session.get("turns", []) or []
     path = _buffer_path(session_id)
     git = _git_identity(cwd)
+    # VONIC_CAPTURE_FILES=0 has to mean the same thing on every adapter. The Claude parser drops
+    # path evidence at parse time; a pre-normalized session arrives with it already collected, so
+    # strip it here — keeping the tool skeleton, exactly as the Claude path does. A kill switch
+    # that works on one runtime and is silently ignored on another is worse than no switch.
+    if not _capture_files():
+        incoming = [
+            {**t,
+             "files": [],
+             "file_ops": [],
+             "tool_events": [{k: v for k, v in event.items() if k != "paths"}
+                             for event in (t.get("tool_events") or []) if isinstance(event, dict)]}
+            for t in incoming if isinstance(t, dict)
+        ]
     # The adapter has already reduced tool inputs to path + access mode. Resolve those local paths
     # before taking the buffer lock; only repository slug/branch/access can reach wire metadata.
     repo_activity = _repo_activity(lambda mod: mod.resolve_turn_accesses(incoming, cwd))
     if not isinstance(repo_activity, list) or len(repo_activity) != len(incoming):
         repo_activity = [None] * len(incoming)
+    # CMEM-support evidence: resolve each turn's tool_events + file_ops to repo-relative refs, same
+    # local-path-never-leaves boundary as repo_activity. Shape is validated in `_capture_context`.
+    capture_paths = _repo_activity(lambda mod: mod.resolve_turn_capture(incoming, cwd))
+    if not isinstance(capture_paths, list) or len(capture_paths) != len(incoming):
+        capture_paths = [{}] * len(incoming)
+    repo_remote = _origin_slug(cwd)
     if git and session.get("branch"):
         git["branch"] = session["branch"]   # the adapter knows its own checkout better than cwd does
     with _locked(path):
@@ -2026,10 +2906,18 @@ def _record_session(session: dict, done: bool) -> str | None:
         seen = buf.get("turns_recorded", 0)
         today = time.strftime("%Y-%m-%d", time.gmtime())
         for i, t in enumerate(incoming[seen:]):
+            raw_assistant = t.get("assistant", "") or ""
             user = _clean(t.get("user", "") or "")
-            assistant = _clean(t.get("assistant", "") or "")
+            assistant = _clean(raw_assistant)
             if not (user or assistant):
                 continue
+            evidence_turn = dict(t)
+            code_edits = list(t.get("code_edits", []) or [])
+            code_edits.extend({"kind": "fence", "language": item.get("language"),
+                               "text": item.get("text", "")}
+                              for item in _fenced_code(raw_assistant))
+            if code_edits:
+                evidence_turn["code_edits"] = code_edits
             entry = {
                 "seq": t.get("seq", seen + i),
                 "date": today,
@@ -2038,8 +2926,23 @@ def _record_session(session: dict, done: bool) -> str | None:
                 "user": user,
                 "assistant": assistant,
                 "files": t.get("files", []) or [],
+                "thinking": (
+                    _cap(
+                        _redact(t.get("thinking", "")),
+                        _env_int("VONIC_MAX_THINKING", 20_000),
+                    )
+                    if _capture_thinking()
+                    else ""
+                ),
                 "uploaded": False,
             }
+            source_message_ids = [str(item) for item in t.get("source_message_ids", [])
+                                  if isinstance(item, str) and item]
+            # New adapter turns use v2 even if an older OpenCode response omitted message IDs: the
+            # deterministic fallback is namespaced away from mutable legacy session:seq IDs.
+            entry["event_id_version"] = 2
+            if source_message_ids:
+                entry["source_message_ids"] = source_message_ids
             activity = repo_activity[seen + i]
             # Adapters that already know the turn's repository activity — the Codex plugin builds it
             # from the typed `patch_apply_end` event via repo_activity.for_paths — pass a `repos`
@@ -2049,6 +2952,15 @@ def _record_session(session: dict, done: bool) -> str | None:
                 entry["repos"] = t["repos"]
             elif activity:
                 entry["repos"] = activity
+            context, evidence = _capture_payload(capture_paths[seen + i], git,
+                                                 evidence_turn, repo_remote)
+            changed_files = _resolved_changed_files(capture_paths[seen + i], git.get("repo", ""))
+            if changed_files:
+                entry["changed_files"] = changed_files
+            if context:
+                entry["capture_context"] = context
+            if evidence:
+                entry["code"] = evidence
             buf["turns"].append(entry)
         buf["turns_recorded"] = len(incoming)
         if done:

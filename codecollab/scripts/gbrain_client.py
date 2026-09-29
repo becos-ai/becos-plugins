@@ -69,6 +69,10 @@ def _audit_call(name: str, arguments: dict, *, response=None, error: Exception |
         "tool": name,
         "request": _redact_audit_value(arguments),
     }
+    if source := os.environ.get("VONIC_CODECOLLAB_RECALL_SOURCE"):
+        record["recall_source"] = source
+    if mode := os.environ.get("VONIC_CODECOLLAB_CALLER_MODE"):
+        record["caller_mode"] = mode
     if error is None:
         record["response"] = _redact_audit_value(response)
     else:

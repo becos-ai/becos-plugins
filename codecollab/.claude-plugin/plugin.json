@@ -1,7 +1,7 @@
 {
   "name": "codecollab",
-  "version": "0.23.4",
-  "description": "Incrementally ships each Claude Code turn's prompt + text reply to the tenant's gbrain, together with the paths of files edited and the repository, branch, author and commit the turn happened in. Never sends thinking, tool calls, code, or patches unless you opt in (VONIC_CAPTURE_THINKING / VONIC_CAPTURE_CODE, both off by default). After installing, run /codecollab:login, then /codecollab:backfill for existing sessions.",
+  "version": "0.24.0",
+  "description": "Incrementally ships each Claude Code turn's prompt and text reply to the tenant's gbrain, together with the commands run, tool output, code edits, and the paths of files edited, and the repository, branch, author and commit the turn happened in. Bodies are captured by default and are secret-redacted, withheld entirely for sensitive paths, and capped before they are stored; each category has its own opt-out (VONIC_CAPTURE_COMMANDS/OUTPUTS/CODE/FILES=0). Thinking is never sent unless you opt in (VONIC_CAPTURE_THINKING=1, off by default). After installing, run /codecollab:login, then /codecollab:backfill for existing sessions.",
   "author": {
     "name": "Becos"
   }
