@@ -102,15 +102,27 @@ def _deliver_session(session: dict, event_kind: str) -> None:
                     stdin_text=json.dumps(session))
 
 
+# `patch_apply_end` change kind -> the vendored core's file-op vocabulary (repo_activity._OP_RANK).
+_OP_FOR_KIND = {"add": "created", "delete": "deleted", "update": "modified"}
+
+
 def _changed_paths(transcript_path: str, offset: int) -> tuple[list[str], int]:
-    """Absolute paths this turn WROTE, read from the rollout since `offset`; plus the new offset.
+    """Absolute paths this turn WROTE since `offset`, plus the new offset (see `_changed_ops`)."""
+    ops, new_offset = _changed_ops(transcript_path, offset)
+    return [op["path"] for op in ops], new_offset
+
+
+def _changed_ops(transcript_path: str, offset: int) -> tuple[list[dict], int]:
+    """File ops (``{"path", "op"}``) this turn WROTE, read from the rollout since `offset`; plus the
+    new offset.
 
     The ONE signal we take from the rollout. A file edit lands as an ``event_msg`` whose payload is
-    a ``patch_apply_end`` carrying ``changes`` — a map keyed by absolute path. We take only its KEYS
-    (the paths); the ``content`` value (the file body / diff) is never read, so the privacy bar is
-    the same as the rest of capture: paths, never contents. Defensive + fail-closed — an unreadable
-    file or an unexpected shape yields no path rather than a wrong or leaky one. A torn final line
-    (a write in flight) is left unconsumed so the next turn re-reads it instead of losing it.
+    a ``patch_apply_end`` carrying ``changes`` — a map keyed by absolute path. We take its KEYS (the
+    paths) and each change's ``type`` string (add / update / delete); the ``content`` value (the file
+    body / diff) is never read, so the privacy bar is the same as the rest of capture: paths, never
+    contents. Defensive + fail-closed — an unreadable file or an unexpected shape yields no path
+    rather than a wrong or leaky one. A torn final line (a write in flight) is left unconsumed so the
+    next turn re-reads it instead of losing it.
     """
     if not transcript_path:
         return [], offset
@@ -125,7 +137,7 @@ def _changed_paths(transcript_path: str, offset: int) -> tuple[list[str], int]:
     if raw and not raw[-1].endswith(b"\n"):   # partial trailing write — re-read it next time
         new_offset -= len(raw[-1])
         raw = raw[:-1]
-    paths: list[str] = []
+    ops: list[dict] = []
     seen: set[str] = set()
     for line in raw:
         try:
@@ -142,11 +154,12 @@ def _changed_paths(transcript_path: str, offset: int) -> tuple[list[str], int]:
         changes = payload.get("changes")
         if not isinstance(changes, dict):
             continue
-        for path in changes:
+        for path, change in changes.items():
             if isinstance(path, str) and path and path not in seen:
                 seen.add(path)
-                paths.append(path)
-    return paths, new_offset
+                kind = change.get("type") if isinstance(change, dict) else None
+                ops.append({"path": path, "op": _OP_FOR_KIND.get(kind, "modified")})
+    return ops, new_offset
 
 
 def _repo_activity(paths: list[str], cwd: str) -> dict | None:
@@ -166,19 +179,22 @@ def _repo_activity(paths: list[str], cwd: str) -> dict | None:
         return None
 
 
-def _turn_activity(payload: dict, state: dict, cwd: str) -> tuple[list[str], dict | None]:
-    """The current turn's changed files + repository activity, advancing the per-session rollout
-    offset stored in ``state``. Codex opens a NEW rollout on resume, so the offset is reset whenever
-    the transcript path moves. Mutates ``state`` (the caller persists it); fail-open."""
+def _turn_activity(payload: dict, state: dict,
+                   cwd: str) -> tuple[list[str], dict | None, list[dict]]:
+    """The current turn's changed files, repository activity and file ops, advancing the
+    per-session rollout offset stored in ``state``. Codex opens a NEW rollout on resume, so the
+    offset is reset whenever the transcript path moves. Mutates ``state`` (the caller persists it);
+    fail-open."""
     transcript = payload.get("transcript_path") or ""
     if not transcript:
-        return [], None
+        return [], None, []
     if state.get("rollout_path") != transcript:     # new rollout file — start from its beginning
         state["rollout_path"] = transcript
         state["rollout_offset"] = 0
-    paths, new_offset = _changed_paths(transcript, state.get("rollout_offset", 0))
+    ops, new_offset = _changed_ops(transcript, state.get("rollout_offset", 0))
     state["rollout_offset"] = new_offset
-    return paths, _repo_activity(paths, state.get("cwd", cwd))
+    paths = [op["path"] for op in ops]
+    return paths, _repo_activity(paths, state.get("cwd", cwd)), ops
 
 
 def _sweep() -> None:
@@ -231,9 +247,20 @@ def main() -> int:
         assistant = (payload.get("last_assistant_message") or "").strip()
         user = state.pop("pending_user", "")
         if event == "Stop" and (user or assistant):
-            files, repos = _turn_activity(payload, state, cwd)
+            files, repos, file_ops = _turn_activity(payload, state, cwd)
             turn = {"seq": len(turns), "ts": _iso_now(),
                     "user": user, "assistant": assistant, "files": files}
+            if file_ops:
+                # The vendored core builds `changed_files` from `file_ops` (resolved to repo-relative
+                # paths locally); the absolute `files` list alone no longer reaches the wire.
+                turn["file_ops"] = file_ops
+            turn_id = payload.get("turn_id")
+            if isinstance(turn_id, str) and turn_id:
+                # Codex's own turn id, which the rollout's `task_complete` also carries: the vendored
+                # core hashes it into `<session>:cx-v2:<digest>`, so live capture and backfill of the
+                # same turn land on ONE event id. Without it the core falls back to hashing the
+                # wall-clock `ts` above, which backfill can never reproduce.
+                turn["source_message_ids"] = [turn_id]
             if repos:
                 turn["repos"] = repos   # carried through _record_session -> repositories_touched
             turns.append(turn)

@@ -123,3 +123,40 @@ def is_recall_feedback_enabled(env: Mapping[str, str] | None = None) -> bool:
     if explicit is not None:
         return explicit != "0"
     return source.get("VONIC_CODECOLLAB_CLIENT_TAG", "cc") not in _SELF_INJECTING_RUNTIMES
+
+
+# Resolve guidance: WHEN to expand a recalled citation, injected only on turns that actually
+# recalled something (an id to expand is a precondition, exactly like the feedback grade).
+#
+# The recalled digest's own server-authored header already NAMES the resolver; this adds the
+# judgement the header does not carry — which citations are worth the bundle and which are not,
+# phrased conditionally so a model does not mechanically resolve everything it was given.
+#
+# Deliberately NOT placed inside the <recalled-memory> block: imperative text inside a recalled
+# digest reads like injection and gets the whole digest discarded. Deliberately tolerant about
+# HOW the citation is resolved, too — `vonic_resolve_event` is supplied by the configured MCP
+# surface, not registered by this plugin, so an install without it still has the CLI path and the
+# guidance stays true either way.
+RESOLVE_TOOL_INSTRUCTIONS = """\
+## Expanding recalled memory
+
+Recalled memory contains compact facts, decisions, and constraints carrying cited ids (a `fact_id` or `decision_id`, shown as `cite: ...`). Expand a citation — with the `vonic_resolve_event` tool when your configured tools provide it, otherwise with `show_source.py <event-id>` — when doing so could help you understand or validate its evidence, history, rationale, provenance, or relationship to other decisions and facts.
+
+A single resolve returns a bounded evidence bundle for that id: the canonical record, the linked decision or fact, the source turn's provenance (repository, branch, commit, time, and author), bounded observed content, changed files, one-hop lifecycle relations, and summarized tool activity. It is a direct read with no model call.
+
+Resolving recalled evidence and inspecting the current source code are complementary. A resolve explains what was previously observed or decided and why; current source inspection establishes what the code does now. You may, and often should, do both when historical context and current behavior matter.
+
+Resolve citations that could materially inform the current step — especially before implementing against a recalled decision, relying on a recalled constraint, repeating or rejecting a prior approach, or stating historical rationale. Prioritize the citations that matter rather than resolving every cited item mechanically."""
+
+
+def is_resolve_tool_enabled(env: Mapping[str, str] | None = None) -> bool:
+    """Whether `recall.py` should explain when to expand a recalled citation.
+
+    Same shape as the other two switches: `VONIC_CODECOLLAB_RESOLVE_TOOL` wins in either
+    direction, and unset it defaults ON except on runtimes that inject the text themselves.
+    """
+    source = os.environ if env is None else env
+    explicit = source.get("VONIC_CODECOLLAB_RESOLVE_TOOL")
+    if explicit is not None:
+        return explicit != "0"
+    return source.get("VONIC_CODECOLLAB_CLIENT_TAG", "cc") not in _SELF_INJECTING_RUNTIMES

@@ -147,8 +147,14 @@ def _parse_rollout(path: str) -> dict | None:
                     pending_user = None
                     pending_user_ts = None
                     if user or assistant:
-                        turns.append({"seq": seq, "user": user, "assistant": assistant,
-                                      "ts": ts, "files": []})
+                        turn = {"seq": seq, "user": user, "assistant": assistant,
+                                "ts": ts, "files": []}
+                        turn_id = payload.get("turn_id")
+                        if isinstance(turn_id, str) and turn_id:
+                            # The same id the live Stop hook reports, so both paths derive one
+                            # `cx-v2` event id for this turn (see _buffer_for).
+                            turn["source_message_ids"] = [turn_id]
+                        turns.append(turn)
                         seq += 1
     except OSError:
         return None
@@ -293,11 +299,19 @@ def _fresh_buffer(session: dict) -> dict:
         assistant = capture._clean(t.get("assistant", "") or "")
         if not (user or assistant):
             continue
-        buf["turns"].append({
+        entry = {
             "seq": t.get("seq", i), "date": today, "ts": t.get("ts") or capture._iso_now(),
             "git": git, "user": user, "assistant": assistant,
             "files": t.get("files", []) or [], "uploaded": False,
-        })
+        }
+        source_ids = [s for s in t.get("source_message_ids", []) or [] if isinstance(s, str) and s]
+        if source_ids:
+            # Opt into the core's v2 identity only when the rollout gave us Codex's turn id: that is
+            # what the live hook hashes too. A rollout without one keeps the legacy `session:seq`
+            # id it has always had, rather than a v2 fallback that hashes nothing either side shares.
+            entry["event_id_version"] = 2
+            entry["source_message_ids"] = source_ids
+        buf["turns"].append(entry)
     return buf
 
 
