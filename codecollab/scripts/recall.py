@@ -161,7 +161,12 @@ _CONTEXT_NOTICE_OPENING = "recalled from captured claude code sessions"
 # message (becos-oc-plugin src/provenance.ts formatHandoff). It is ~11k chars of prior-session
 # evidence, not the question: searched as-is it dominates the recall query. Only a LEADING block is
 # matched; the model still receives the prompt unchanged, this only shapes the search text.
-_LEADING_HANDOFF_RE = re.compile(r"\A\s*<repository-handoff>.*?</repository-handoff>\s*", re.DOTALL)
+# The block ends at a closing tag on a line of its own, as formatHandoff writes it: the evidence
+# inside is one-line JSON that can quote the tags (prior turns discussing the handoff), and stopping
+# at the first quoted `</repository-handoff>` would leave the rest of the block in the search text.
+_LEADING_HANDOFF_RE = re.compile(
+    r"\A\s*<repository-handoff>\n.*?\n</repository-handoff>[ \t]*(?:\n|\Z)\s*", re.DOTALL
+)
 
 
 def _strip_handoff(prompt: str) -> str:
