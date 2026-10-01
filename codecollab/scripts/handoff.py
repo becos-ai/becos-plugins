@@ -55,6 +55,7 @@ _STARTUP_POLICY: dict = {
     "detail_level": "compact",    # prompt + trimmed reply + changed files + tool counts
     "include_reasoning": False,
 }
+_FRAMING_RESERVE = 500   # chars of framing around the startup handoff's JSON, within its budget
 _INT_POLICY_KEYS = ("budget_chars", "max_turns", "recent_full_turns", "max_age_days")
 _DETAIL_LEVELS = {"full", "prose", "compact", "title"}
 
@@ -98,7 +99,10 @@ def fetch(request: dict) -> str:
     if branch:
         arguments["branch_name"] = branch
     if request.get("startup") is True:
-        request = {**_STARTUP_POLICY, "budget_chars": _session_start_budget(), **request}
+        # The budget is what reaches the model: reserve room for the framing around the JSON (the
+        # `session history` line, the descriptive preamble and the <repository-handoff> tags).
+        budget = max(_MIN_BUDGET, _session_start_budget() - _FRAMING_RESERVE)
+        request = {**_STARTUP_POLICY, "budget_chars": budget, **request}
     for key in _INT_POLICY_KEYS:
         value = request.get(key)
         if isinstance(value, int) and not isinstance(value, bool):
@@ -126,7 +130,10 @@ def fetch(request: dict) -> str:
     if not checkpoint.get("timeline"):
         return f"no prior session history for {repo}{'@' + branch if branch else ''}."
     scope = f"{repo}@{branch}" if branch else f"{repo} (all branches)"
-    return f"session history — {scope}\n" + json.dumps(data, ensure_ascii=False, indent=2)
+    # Compact JSON: the server budgets `budget_chars` over compact JSON, and pretty-printing would
+    # add ~17% on top (a 12k startup handoff reached the model as ~14k characters).
+    return f"session history — {scope}\n" + json.dumps(data, ensure_ascii=False,
+                                                        separators=(",", ":"))
 
 
 def _session_start_budget() -> int:
