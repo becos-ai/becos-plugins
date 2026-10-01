@@ -194,13 +194,46 @@ def _abspath(path: str, cwd: str) -> str:
     return os.path.normpath(path)
 
 
+# A here-document operator and its delimiter word: `<<EOF`, `<<-EOF`, `<< 'EOF'`, `<<"EOF"`. Not the
+# here-string `<<<`, whose operand is an ordinary word on the same line.
+_HEREDOC_RE = re.compile(r"(?<!<)<<(-?)[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2(?!<)")
+
+
+def _strip_heredocs(command: str) -> str:
+    """Drop here-document bodies, which are data (often code), not shell.
+
+    Parsing a body as commands turns its text into false evidence: `-> None:` or `x >= 2` in an
+    embedded Python script read as output redirects to files named `None:` or `=`. The operator is
+    removed from its line; every following line up to the delimiter line is dropped (`<<-` also
+    accepts a tab-indented delimiter). An unterminated body runs to the end of the command.
+    """
+    out: list[str] = []
+    pending: list[tuple[str, bool]] = []
+    for line in command.split("\n"):
+        if pending:
+            delimiter, tabs = pending[0]
+            if (line.lstrip("\t") if tabs else line).rstrip() == delimiter:
+                pending.pop(0)
+            continue
+        found = [(m.group(3), m.group(1) == "-") for m in _HEREDOC_RE.finditer(line)]
+        out.append(_HEREDOC_RE.sub(" ", line) if found else line)
+        pending.extend(found)
+    return "\n".join(out)
+
+
+def _unresolvable(word: str) -> bool:
+    """Shell expansion (`$VAR`, `$(…)`, backticks) or process substitution: not a concrete path."""
+    return any(marker in word for marker in ("$", "`", "<(", ">("))
+
+
 def _path_args(args: list[str], base: str) -> list[str]:
     """Arguments that are confidently paths: they contain a separator, or they name something
     that exists under `base`. A bare word that happens to be a filename is a harmless
-    over-match — it resolves to the same repo as `base` anyway."""
+    over-match — it resolves to the same repo as `base` anyway. Words that still need shell
+    expansion are never paths: `$L/repo` would otherwise resolve to a literal `./$L/repo`."""
     paths = []
     for arg in args:
-        if not arg or arg.startswith("-"):
+        if not arg or arg.startswith("-") or _unresolvable(arg):
             continue
         resolved = _abspath(arg, base)
         if os.sep in arg or os.path.exists(resolved):
@@ -352,7 +385,7 @@ def _bash_accesses(command: str, cwd: str) -> list[tuple[str, str]]:
     """
     accesses: list[tuple[str, str]] = []
     base = cwd or os.getcwd()
-    for segment in _SEGMENT_RE.split(command):
+    for segment in _SEGMENT_RE.split(_strip_heredocs(command)):
         segment = segment.strip()
         if not segment:
             continue
@@ -364,7 +397,7 @@ def _bash_accesses(command: str, cwd: str) -> list[tuple[str, str]]:
         if not tokens:
             continue
         if os.path.basename(tokens[0]) == "cd":
-            if len(tokens) > 1:  # moves the base for the rest of the chain
+            if len(tokens) > 1 and not _unresolvable(tokens[1]):  # moves the base for the chain
                 base = _abspath(tokens[1], base)
             continue
         mode, paths = _classify(tokens, base, redirected, redirect_targets)

@@ -20,8 +20,8 @@ backend cannot delay a session or a prompt:
                        a transcript attachment, so it is never re-sent.
   session-end          SessionEnd. Remove the session's state files.
 
-All four are skipped under ``OPENCODE=1``: when Claude Code is hosted by Opencode, the Opencode
-plugin owns the handoff. They are skipped likewise when another host such as Cursor runs these
+All four are skipped when Claude Code is hosted by Opencode's Claude bridge
+(``capture.hosted_by_opencode``): the Opencode plugin owns the handoff there. They are skipped likewise when another host such as Cursor runs these
 Claude Code hooks (``capture.foreign_host``); that host's own plugin owns it. Hook stdout becomes model context, so a failure prints nothing.
 """
 
@@ -50,13 +50,13 @@ _MIN_BUDGET, _MAX_BUDGET = 1_000, 500_000
 # enforces budget_chars as a hard cap over this policy.
 _STARTUP_POLICY: dict = {
     "max_turns": 30,
-    "recent_full_turns": 5,
+    "recent_full_turns": 0,       # "full" carries raw tool bodies: 20k-89k chars a turn, live
     "max_age_days": 5,
-    "detail_level": "prose",
+    "detail_level": "compact",    # prompt + trimmed reply + changed files + tool counts
     "include_reasoning": False,
 }
 _INT_POLICY_KEYS = ("budget_chars", "max_turns", "recent_full_turns", "max_age_days")
-_DETAIL_LEVELS = {"full", "prose", "title"}
+_DETAIL_LEVELS = {"full", "prose", "compact", "title"}
 
 # Background startup fetch: one retry, after a short pause, for failures another attempt can fix.
 _FETCH_ATTEMPTS = 2
@@ -143,7 +143,7 @@ def _handoff_enabled() -> bool:
         env.get("VONIC_CODECOLLAB_DISABLED") == "1"
         or env.get("VONIC_HANDOFF_SESSION_START", "1") == "0"
         or env.get("VONIC_CODECOLLAB_HANDOFF_AUTO", "1") == "0"
-        or env.get("OPENCODE") == "1"
+        or capture.hosted_by_opencode()
         or capture.foreign_host() is not None
     )
 

@@ -138,6 +138,20 @@ def foreign_host() -> str | None:
     return None
 
 
+def hosted_by_opencode() -> bool:
+    """Whether this Claude Code process was launched by Opencode's Claude bridge.
+
+    The bridge runs Claude Code through the Agent SDK inside Opencode, so the process carries both
+    ``OPENCODE=1`` and ``CLAUDE_AGENT_SDK_VERSION``. There the Opencode plugin already captures the
+    same conversation (with richer tool evidence, since Claude's tools are Opencode's MCP tools) and
+    owns the handoff, so this runtime must not record a twin of every turn. A plain ``claude``
+    started from an Opencode terminal has ``OPENCODE=1`` but no SDK marker, and keeps capturing.
+    Recall is NOT affected: Opencode does not inject recall for Claude models; this hook does.
+    """
+    return (_client_tag() == "cc" and os.environ.get("OPENCODE") == "1"
+            and bool(os.environ.get("CLAUDE_AGENT_SDK_VERSION")))
+
+
 def _sessions_dir() -> str:
     # Namespaced per runtime: <cache>/codecollab/<tag>/sessions/. buffer/lock paths and the sweep
     # all derive from here, so they follow automatically.
@@ -3096,6 +3110,12 @@ def main() -> int:
         event = json.load(sys.stdin)
     except (json.JSONDecodeError, ValueError) as exc:
         _debug(f"bad hook input: {exc}")
+        return 0
+
+    if mode in ("turn", "finalize") and hosted_by_opencode():
+        # Capture only: sweep (above) still delivers anything already buffered, and recall.py is
+        # untouched. The Opencode plugin records this conversation.
+        _debug(f"{mode}: Claude Code hosted by Opencode's bridge — Opencode captures this session")
         return 0
 
     if mode in ("turn", "finalize"):

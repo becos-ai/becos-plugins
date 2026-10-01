@@ -1,0 +1,33 @@
+{
+  "_comment": "Shared by becos-claude-plugin (repo_activity._bash_accesses) and becos-oc-plugin (normalize.ts bashAccesses). Paths are relative to cwd. `writes` must all be reported as writes (bare words only count as paths with a `./` prefix or a separator); no reported path may contain any `forbidden` substring; `reads_only` means no path may be written except cwd itself.",
+  "cwd": "/w",
+  "cases": [
+    {"name": "heredoc body with arrows and comparisons is data",
+     "command": "cat > out.py <<'EOF'\ndef f(x) -> None:\n    return x >= 2\nEOF",
+     "writes": ["out.py"], "forbidden": ["None", "=", "EOF"]},
+    {"name": "heredoc into an interpreter writes nothing",
+     "command": "python3 - <<'PY'\nprint(3 > 2)\nwith open('x') as fh: pass\nPY",
+     "writes": [], "forbidden": ["2)", "PY"], "reads_only": true},
+    {"name": "tab-indented delimiter with <<-",
+     "command": "cat <<-END > notes.txt\n\tif a > b then\n\tEND",
+     "writes": ["notes.txt"], "forbidden": ["b then", "END"]},
+    {"name": "double-quoted delimiter and a command after the body",
+     "command": "cat << \"DOC\" > a.md\nx > y\nDOC\ntouch ./after.txt",
+     "writes": ["a.md", "after.txt"], "forbidden": ["/y", "DOC"]},
+    {"name": "unexpanded variables are not paths",
+     "command": "cat $L/repo/run.txt > $OUT/result.txt && cp $SRC/a ./b",
+     "writes": ["b"], "forbidden": ["$"]},
+    {"name": "command substitution target is not a path",
+     "command": "echo hi > $(mktemp) && echo x > `mktemp`",
+     "writes": [], "forbidden": ["$(", "`", "mktemp"]},
+    {"name": "newline separates commands and cd applies to the next line",
+     "command": "cd sub\ntouch ./a.txt",
+     "writes": ["sub/a.txt"], "forbidden": []},
+    {"name": "here-string is not a heredoc and quoted > is not a redirect",
+     "command": "cat <<< \"a > b\"",
+     "writes": [], "forbidden": ["/b"], "reads_only": true},
+    {"name": "plain redirect still records the target",
+     "command": "echo x > out.txt 2>/dev/null",
+     "writes": ["out.txt"], "forbidden": []}
+  ]
+}
