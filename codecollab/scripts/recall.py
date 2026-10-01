@@ -49,6 +49,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import sys
 import time
 
@@ -154,6 +155,18 @@ _SERVER_SENTINELS = (
 # REPOSITORY_RECALL_HEADER). Only the stable first clause is matched, so re-wording its tail
 # cannot break detection, and an older server that sends no header degrades to a no-op.
 _CONTEXT_NOTICE_OPENING = "recalled from captured claude code sessions"
+
+# A host-injected startup handoff at the head of the prompt. OpenCode's Claude bridge has no other
+# channel, so the OpenCode plugin prefixes `<repository-handoff>…</repository-handoff>` onto one user
+# message (becos-oc-plugin src/provenance.ts formatHandoff). It is ~11k chars of prior-session
+# evidence, not the question: searched as-is it dominates the recall query. Only a LEADING block is
+# matched; the model still receives the prompt unchanged, this only shapes the search text.
+_LEADING_HANDOFF_RE = re.compile(r"\A\s*<repository-handoff>.*?</repository-handoff>\s*", re.DOTALL)
+
+
+def _strip_handoff(prompt: str) -> str:
+    """`prompt` without a leading `<repository-handoff>` block: the text recall searches on."""
+    return _LEADING_HANDOFF_RE.sub("", prompt, count=1)
 
 
 class AuthExpired(Exception):
@@ -532,6 +545,9 @@ def main() -> int:
         return 0
 
     if os.environ.get("VONIC_RECALL_ENABLED", "1") != "1":
+        return _flush()
+    prompt = _strip_handoff(prompt)
+    if not prompt:  # a handoff with no question after it: nothing to search on
         return _flush()
     cwd = payload.get("cwd") or os.getcwd()   # scopes recall to the checkout being worked in
     scope = _query_scope(
