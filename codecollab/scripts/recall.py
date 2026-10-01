@@ -482,6 +482,10 @@ def _query(prompt: str, scope: dict | None) -> str:
 
 
 def main() -> int:
+    if capture.foreign_host():
+        # Claude Code hook run by another host (e.g. Cursor's third-party hook import): that host's
+        # own CodeCollab plugin owns recall. Nothing is printed, so no context is injected.
+        return 0
     try:
         payload = json.load(sys.stdin)
     except Exception:  # noqa: BLE001

@@ -124,6 +124,20 @@ def _client_tag() -> str:
     return os.environ.get("VONIC_CODECOLLAB_CLIENT_TAG", "cc")
 
 
+def foreign_host() -> str | None:
+    """The coding-agent host that is running THIS runtime's Claude Code hooks, else None.
+
+    Cursor imports Claude Code hooks by default ("Third-Party Imports") and exports
+    ``CURSOR_VERSION`` to every hook process. Run there under tag ``cc``, these hooks would record a
+    Cursor conversation as Claude Code — the wrong client tag and buffer namespace, parsed from a
+    transcript in another format — next to the Cursor plugin's own capture. So the ``cc`` runtime
+    stands down, the same way the handoff stands down under ``OPENCODE=1``. Only ``cc`` does: the
+    Cursor plugin vendors this same file with tag ``cur`` and must keep working under Cursor."""
+    if _client_tag() == "cc" and os.environ.get("CURSOR_VERSION"):
+        return "cursor"
+    return None
+
+
 def _sessions_dir() -> str:
     # Namespaced per runtime: <cache>/codecollab/<tag>/sessions/. buffer/lock paths and the sweep
     # all derive from here, so they follow automatically.
@@ -1174,7 +1188,7 @@ def _plugin_version() -> str:
     verifiable (which cached copy actually fired), not just what `plugin list` claims.
 
     The deliverer is vendored into different layouts — Claude `.claude-plugin/`, Codex `.codex-plugin/`,
-    Opencode `package.json` — so try each manifest relative to this file's parent dir. Cached; best-effort
+    Cursor `.cursor-plugin/`, Opencode `package.json` — so try each manifest relative to this file's parent dir. Cached; best-effort
     ('?' if none found). The buffer copy rides to the backend in the free-form ``metadata`` bag as
     ``client_version``, feeding fleet/version reporting.
     """
@@ -1183,7 +1197,8 @@ def _plugin_version() -> str:
         return _PLUGIN_VERSION
     parent = _plugin_root()
     ver = "?"
-    for rel in (".claude-plugin/plugin.json", ".codex-plugin/plugin.json", "package.json"):
+    for rel in (".claude-plugin/plugin.json", ".codex-plugin/plugin.json",
+                ".cursor-plugin/plugin.json", "package.json"):
         try:
             with open(os.path.join(parent, rel), encoding="utf-8") as fh:
                 ver = json.load(fh).get("version") or "?"
@@ -3045,6 +3060,11 @@ def main() -> int:
         return _deliver(sys.argv[2]) if len(sys.argv) > 2 else 0
 
     if os.environ.get("VONIC_CODECOLLAB_DISABLED") == "1":
+        return 0
+    if host := foreign_host():
+        # Every hook mode below; `--deliver` above stays live so an already-spawned delivery of a
+        # genuine Claude Code buffer can still finish.
+        _debug(f"{mode or 'hook'}: Claude Code hook run by {host} — standing down")
         return 0
 
     if mode == "sweep":
