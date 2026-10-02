@@ -1,17 +1,24 @@
-"""Repository-provenance instructions injected into every model turn by `recall.py`.
+"""CodeCollab's static instruction texts: repository provenance, recall feedback, resolve guidance.
 
-PROVENANCE_INSTRUCTIONS is a FAITHFUL copy of the "## Repository provenance in responses" section
-of `docs/REPO_INSTRUCTIONS.md` in the `vonic_stack` repo (github.com/amitojch/vonic_stack), minus
-that section's human-facing "> Enforcement note:" blockquote — which documents the mechanism for
-readers and must not be fed to the model. The same body is mirrored in oc-codecollab-plugin's
-`src/provenance.ts`; all three must stay byte-for-byte identical, because becos PARSES the citation
-tokens this grammar produces. Keep them in sync by hand; `test_provenance.py` guards the copy here.
+Two sets, chosen by ``VONIC_CODECOLLAB_INSTRUCTIONS`` (see ``instructions_mode``):
 
-Why every turn: the tokens are not decoration. becos validates them verbatim against the exchange,
-resolves the cited alias to `org/repo`, and re-partitions each derived fact by the repository it is
-actually about rather than the session's single ambient cwd. A turn that states repository facts
-without tokens is filed under the wrong repo, so the grammar has to be in front of the model on
-every turn, not just the ones where memory happened to be recalled.
+- ``compact`` (default, 0.28.0): short texts, delivered ONCE per session and again after compaction
+  by ``instructions.py session-start``, plus ``SESSION_REMINDER`` (one line) on every prompt from
+  ``recall.py``. They were sent on every prompt before, and Claude Code keeps each hook's output in
+  the transcript, so the same ~5.7k chars piled up turn after turn (60% of all hook context in a
+  measured session).
+- ``legacy``: the 0.27.3 texts and behaviour, byte for byte: the full texts on every prompt from
+  ``recall.py`` and nothing at session start. This is the backup: set
+  ``VONIC_CODECOLLAB_INSTRUCTIONS=legacy`` to revert without a release if citation or feedback
+  quality drops. ``test_provenance.py`` pins the ``LEGACY_*`` texts by SHA-256 so they cannot drift.
+
+The provenance text is a FAITHFUL copy of the provenance section of ``docs/REPO_INSTRUCTIONS.md``
+(compact) and ``docs/REPO_INSTRUCTIONS_LEGACY.md`` (legacy) in the ``vonic_stack`` repo, minus the
+human-facing "> Enforcement note:" blockquote, and is mirrored in becos-oc-plugin's
+``src/provenance.ts``. Keep all three byte-for-byte identical: becos PARSES the citation tokens this
+grammar produces (``provenance_citations.json`` is the frozen grammar). The feedback and resolve
+texts are not mirrored contracts, but their machine-readable token forms must stay identical across
+runtimes.
 """
 
 from __future__ import annotations
@@ -19,7 +26,86 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 
+
+# The active (compact) set. becos resolves a cited alias by matching it against the LAST segment of
+# the `org/repo` slug (becos_memforest coding/repo_resolver.py), so "without the owner" is load-bearing.
 PROVENANCE_INSTRUCTIONS = """\
+## Repository provenance
+Tag each claim drawn from repository contents (a finding, decision, constraint, change, verification or reference) inline, in the message where you first state it, narration between tool calls included:
+`[repo:<alias> path:<repo-relative-path> symbol:<symbol>]`
+- `<alias>`: the repository's name from its `origin` remote, without the owner (not the local directory name; no `origin`: the directory name). `path:` and `symbol:` are optional; add them when known. Keys in this order; values contain no spaces or `]`.
+- One repository per token. A sentence drawing on two repositories gets one token per clause.
+- Name the repository you actually inspected; never guess. Uncertain: `[repo:unknown]`. Your own inference: `[analysis]`.
+Example: `[repo:agent path:src/memory/store.py symbol:MemoryStore.save]`"""
+
+# Worded as a standing rule (it is delivered once, not beside each digest), and it says a handoff
+# is not recalled memory: the handoff quotes earlier replies' grade lines, which must not be graded.
+RECALL_FEEDBACK_INSTRUCTIONS = """\
+## Recalled-memory feedback
+When a turn's context includes a `<recalled-memory>` block, end that reply with one line grading it; otherwise omit the line. A `<repository-handoff>` block is not recalled memory.
+`[recall-relevance: <grade>] [recall-tokens-saved: ~<N>]` — <basis>
+- `<grade>`: `low`, `medium`, `good`, `very good` or `excellent`: how relevant the recalled facts were to the turn.
+- `<N>`: rough tokens the memory saved you (reads, searches, re-derivation); `~0` if none. `<basis>` names that work in a few words."""
+
+# Only the judgement of WHEN to resolve. The server's own header on every recalled digest already
+# names `vonic_resolve_event`, the `show_source.py` fallback and that it is a direct read; if that
+# header ever stops naming them, they have to come back here.
+RESOLVE_TOOL_INSTRUCTIONS = """\
+## Expanding recalled memory
+Resolve a recalled citation (`cite: fact_…` / `decision_…`) when it bears on the current step: before building on a recalled decision or constraint, repeating or rejecting a prior approach, or stating why something was done. Not for every id. A resolve shows what was recorded and why; current source shows what is true now, so check both when they matter."""
+
+# One line on every prompt in compact mode, so the two machine-parsed outputs stay in view late in
+# a long session; the full rules arrive at session start and after compaction.
+# It must not contain the literal `<recalled-memory>` tag: the line rides EVERY prompt, and the
+# feedback rule keys on that tag being present, so carrying it would make every turn look recalled.
+SESSION_REMINDER = (
+    "CodeCollab session rules apply: `[repo:…]` tokens on repository claims; "
+    "a grade line after any turn that carries recalled memory."
+)
+
+_MODES = frozenset({"compact", "legacy"})
+
+
+def instructions_mode(env: Mapping[str, str] | None = None) -> str:
+    """``compact`` (default) or ``legacy``, from ``VONIC_CODECOLLAB_INSTRUCTIONS``. Anything else
+    reads as the default, so a typo cannot silently drop the instructions altogether."""
+    source = os.environ if env is None else env
+    value = (source.get("VONIC_CODECOLLAB_INSTRUCTIONS") or "").strip().lower()
+    return value if value in _MODES else "compact"
+
+
+def instruction_texts(env: Mapping[str, str] | None = None) -> tuple[str, str, str]:
+    """``(provenance, feedback, resolve)`` texts of the selected set."""
+    if instructions_mode(env) == "legacy":
+        return (LEGACY_PROVENANCE_INSTRUCTIONS, LEGACY_RECALL_FEEDBACK_INSTRUCTIONS,
+                LEGACY_RESOLVE_TOOL_INSTRUCTIONS)
+    return PROVENANCE_INSTRUCTIONS, RECALL_FEEDBACK_INSTRUCTIONS, RESOLVE_TOOL_INSTRUCTIONS
+
+
+def session_instructions(env: Mapping[str, str] | None = None) -> str:
+    """The text ``instructions.py session-start`` injects: the enabled compact sections, or nothing
+    in legacy mode (legacy delivers on every prompt from ``recall.py`` instead)."""
+    if instructions_mode(env) == "legacy":
+        return ""
+    prov, feedback, resolve = instruction_texts(env)
+    parts = [text for text, on in ((prov, is_provenance_enabled(env)),
+                                   (feedback, is_recall_feedback_enabled(env)),
+                                   (resolve, is_resolve_tool_enabled(env))) if on]
+    return "\n\n".join(parts)
+
+
+def session_reminder(env: Mapping[str, str] | None = None) -> str:
+    """The per-prompt line in compact mode, when either parsed output is in play; else empty."""
+    if instructions_mode(env) == "legacy":
+        return ""
+    if is_provenance_enabled(env) or is_recall_feedback_enabled(env):
+        return SESSION_REMINDER
+    return ""
+
+
+# ---- legacy set (0.27.3), frozen: the revert path. Do not edit; test_provenance.py pins them. ----
+
+LEGACY_PROVENANCE_INSTRUCTIONS = """\
 ## Repository provenance in responses
 
 This workspace contains multiple Git repositories.
@@ -73,8 +159,8 @@ Examples:
 # `additionalContext` verbatim as the recalled-memory digest (and renders it in the visible
 # `codecollab_recall` tool), so prepending the grammar here would both duplicate it and pollute
 # that digest. Claude Code and Codex have no such path: the hook is their only channel.
-# Cursor (`cur`) is the same case by another route: its plugin carries all three texts in an
-# always-applied rule, and its `codecollab_recall` tool returns this hook's output as the digest.
+# Cursor (`cur`) is the same case by another route: its plugin returns all three texts from its
+# `sessionStart` hook, and its `codecollab_recall` tool returns this hook's output as the digest.
 _SELF_INJECTING_RUNTIMES = frozenset({"oc", "cur"})
 
 
@@ -99,7 +185,7 @@ def is_provenance_enabled(env: Mapping[str, str] | None = None) -> bool:
 # here — Claude Code and Codex receive recall solely as the `<recalled-memory>` block. The two
 # machine-readable TOKEN forms are kept byte-identical so anything that later parses them works
 # across all three runtimes. Display-only today: nothing captures these yet.
-RECALL_FEEDBACK_INSTRUCTIONS = """\
+LEGACY_RECALL_FEEDBACK_INSTRUCTIONS = """\
 ## Recalled-memory feedback
 
 The turn you are answering may be given recalled memory from earlier sessions, as a `<recalled-memory>` context block. Because that memory was provided this turn, end your response with a single recall-feedback line assessing it. If — and only if — no recalled memory was provided this turn (no `<recalled-memory>` block), omit this line entirely; never fabricate a grade for memory that was not recalled.
@@ -139,7 +225,7 @@ def is_recall_feedback_enabled(env: Mapping[str, str] | None = None) -> bool:
 # HOW the citation is resolved, too — `vonic_resolve_event` is supplied by the configured MCP
 # surface, not registered by this plugin, so an install without it still has the CLI path and the
 # guidance stays true either way.
-RESOLVE_TOOL_INSTRUCTIONS = """\
+LEGACY_RESOLVE_TOOL_INSTRUCTIONS = """\
 ## Expanding recalled memory
 
 Recalled memory contains compact facts, decisions, and constraints carrying cited ids (a `fact_id` or `decision_id`, shown as `cite: ...`). Expand a citation — with the `vonic_resolve_event` tool when your configured tools provide it, otherwise with `show_source.py <event-id>` — when doing so could help you understand or validate its evidence, history, rationale, provenance, or relationship to other decisions and facts.

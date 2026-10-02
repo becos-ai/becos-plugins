@@ -849,7 +849,11 @@ _REDACTORS = (
     # match any letter, turning it into a blanket "any `identifier = value` line" redactor and
     # mangling ordinary lowercase code (`buf = json.load(...)` -> `buf = «redacted-env»`).
     (re.compile(r"(?m)^([A-Z][A-Z0-9_]{2,}\s*=\s*)[^\s]+"), r"\1«redacted-env»"),
-    (re.compile(r"(?i)\b([A-Za-z][A-Za-z0-9_-]*(?:token|key|secret|password|passwd|credential)"
+    # `recall-tokens-saved` is excluded by name: it is the recall-feedback grade line
+    # (`[recall-tokens-saved: ~600]`, provenance.py), a count and not a credential, and redacting it
+    # destroyed the machine-readable token (and its closing `]`) in every captured reply.
+    (re.compile(r"(?i)\b(?!recall-tokens-saved\b)"
+                r"([A-Za-z][A-Za-z0-9_-]*(?:token|key|secret|password|passwd|credential)"
                 r"[A-Za-z0-9_-]*)(\s*[:=]\s*)(?:(['\"])[\s\S]*?\3|[^\s'\"]+)"),
      r"\1\2«redacted»"),
     (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "«redacted-aws-key»"),

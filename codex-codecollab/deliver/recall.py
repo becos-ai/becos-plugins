@@ -535,14 +535,21 @@ def main() -> int:
     if not prompt or prompt.startswith("/"):  # not a model turn — inject nothing at all
         return 0
 
-    # ONE additionalContext payload, assembled from independent parts. Provenance rides on EVERY
-    # model turn: it governs how the model must cite repositories, which has nothing to do with
-    # whether memory happened to be recalled. So it is added up front, before any of the recall
-    # paths below that can bail out — each of those now flushes what it has instead of returning
-    # silently. Recalled memory, when there is any, is appended after it.
+    # ONE additionalContext payload, assembled from independent parts. Something about citing
+    # repositories rides on EVERY model turn, whether or not memory is recalled, so it is added up
+    # front, before any of the recall paths below that can bail out — each of those flushes what it
+    # has instead of returning silently. Recalled memory, when there is any, is appended after it.
+    #   compact (default): one reminder line; the full rules arrive once per session and after
+    #                      compaction from `instructions.py session-start`.
+    #   legacy:            the full provenance text, as in 0.27.3 (the revert path).
+    legacy = provenance.instructions_mode() == "legacy"
+    prov_text, feedback_text, resolve_text = provenance.instruction_texts()
     parts: list[str] = []
-    if provenance.is_provenance_enabled():
-        parts.append(provenance.PROVENANCE_INSTRUCTIONS)
+    if legacy:
+        if provenance.is_provenance_enabled():
+            parts.append(prov_text)
+    elif provenance.session_reminder():
+        parts.append(provenance.session_reminder())
 
     def _flush() -> int:
         if parts:
@@ -588,15 +595,15 @@ def main() -> int:
     _log(f"inject  {len(answer)}c  prompt={prompt[:60]!r}  ::  {snippet}")
 
     parts.append(_wrap(answer, scope))   # explicit provenance — see _emit_context
-    # Ask for a relevance/tokens-saved grade, but ONLY here: this is the one path where memory was
-    # actually recalled, so the model is never asked to grade something it was not given. It goes
-    # after the digest so the thing being graded is already in view.
-    if provenance.is_recall_feedback_enabled():
-        parts.append(provenance.RECALL_FEEDBACK_INSTRUCTIONS)
-    # Same precondition: guidance on WHICH recalled citations are worth expanding is meaningless
-    # on a turn that recalled none, so it rides only on the path that produced ids.
-    if provenance.is_resolve_tool_enabled():
-        parts.append(provenance.RESOLVE_TOOL_INSTRUCTIONS)
+    if legacy:
+        # Legacy: ask for a relevance/tokens-saved grade, but ONLY here, the one path where memory
+        # was actually recalled, after the digest so the thing being graded is in view. Resolve
+        # guidance rides the same precondition. In compact mode both are standing rules delivered
+        # at session start, worded to apply only to turns that carry a <recalled-memory> block.
+        if provenance.is_recall_feedback_enabled():
+            parts.append(feedback_text)
+        if provenance.is_resolve_tool_enabled():
+            parts.append(resolve_text)
     return _flush()
 
 

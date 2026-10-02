@@ -1,5 +1,5 @@
 {
-  "description": "codecollab capture + recall + startup handoff (becos brain).",
+  "description": "codecollab capture + recall + startup handoff + session instructions (becos brain).",
   "hooks": {
     "SessionStart": [
       {
@@ -14,6 +14,16 @@
           {
             "type": "command",
             "command": "bash -lc 'set -a; [ -f \"$HOME/.codex/codecollab.env\" ] && . \"$HOME/.codex/codecollab.env\" >/dev/null 2>&1; set +a; export VONIC_CODECOLLAB_CLIENT_TAG=cx; exec python3 \"${PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/deliver/handoff.py\" session-start'",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "startup|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -lc 'set -a; [ -f \"$HOME/.codex/codecollab.env\" ] && . \"$HOME/.codex/codecollab.env\" >/dev/null 2>&1; set +a; export VONIC_CODECOLLAB_CLIENT_TAG=cx; exec python3 \"${PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/deliver/instructions.py\" session-start'",
             "timeout": 5
           }
         ]
