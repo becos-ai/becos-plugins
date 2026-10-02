@@ -15,9 +15,10 @@ Hooks (see ../hooks/hooks.json):
                              buffer + delivery path. Used by ports, e.g. Opencode (client-tag oc).
 
 PRIVACY CONTRACT
-  Only the user's prompts and Claude's *text* replies leave this machine. Thinking
-  and tool_use blocks (the code and patches) are never read; only the file *paths*
-  touched are recorded. Fenced code in prose is stripped by default.
+  User/assistant prose and default-on, allow-listed command, output, code-edit and
+  file-path evidence may leave this machine after redaction, sensitive-path
+  withholding and hard caps. Thinking remains explicit opt-in. Fenced code in
+  canonical prose is stripped by default.
 
 Each turn is buffered locally first (crash-resilient), then delivered detached. A
 lock serialises deliveries so a turn is never uploaded twice.
@@ -44,7 +45,9 @@ import fnmatch
 import hashlib
 import ipaddress
 import json
+import ntpath
 import os
+import posixpath
 import re
 import subprocess
 import sys
@@ -119,6 +122,34 @@ def _client_tag() -> str:
     destination. Each runtime MUST set VONIC_CODECOLLAB_CLIENT_TAG (codex=cx, oc=oc); cc is the
     Claude default. See docs/DECISIONS.md."""
     return os.environ.get("VONIC_CODECOLLAB_CLIENT_TAG", "cc")
+
+
+def foreign_host() -> str | None:
+    """The coding-agent host that is running THIS runtime's Claude Code hooks, else None.
+
+    Cursor imports Claude Code hooks by default ("Third-Party Imports") and exports
+    ``CURSOR_VERSION`` to every hook process. Run there under tag ``cc``, these hooks would record a
+    Cursor conversation as Claude Code — the wrong client tag and buffer namespace, parsed from a
+    transcript in another format — next to the Cursor plugin's own capture. So the ``cc`` runtime
+    stands down, the same way the handoff stands down under ``OPENCODE=1``. Only ``cc`` does: the
+    Cursor plugin vendors this same file with tag ``cur`` and must keep working under Cursor."""
+    if _client_tag() == "cc" and os.environ.get("CURSOR_VERSION"):
+        return "cursor"
+    return None
+
+
+def hosted_by_opencode() -> bool:
+    """Whether this Claude Code process was launched by Opencode's Claude bridge.
+
+    The bridge runs Claude Code through the Agent SDK inside Opencode, so the process carries both
+    ``OPENCODE=1`` and ``CLAUDE_AGENT_SDK_VERSION``. There the Opencode plugin already captures the
+    same conversation (with richer tool evidence, since Claude's tools are Opencode's MCP tools) and
+    owns the handoff, so this runtime must not record a twin of every turn. A plain ``claude``
+    started from an Opencode terminal has ``OPENCODE=1`` but no SDK marker, and keeps capturing.
+    Recall is NOT affected: Opencode does not inject recall for Claude models; this hook does.
+    """
+    return (_client_tag() == "cc" and os.environ.get("OPENCODE") == "1"
+            and bool(os.environ.get("CLAUDE_AGENT_SDK_VERSION")))
 
 
 def _sessions_dir() -> str:
@@ -633,6 +664,7 @@ def _fenced_code(text: str) -> list[dict]:
 
 _READ_TOOLS = {"Read", "NotebookRead"}
 _SEARCH_TOOLS = {"Grep", "Glob"}
+_BASH_TOOLS = {"Bash"}
 # Tools whose input is understood well enough to lift a path from. Anything else (Task/Agent,
 # AskUserQuestion, ToolSearch, every mcp__* tool) is deliberately absent.
 _PATH_TOOLS = _READ_TOOLS | _SEARCH_TOOLS | _EDIT_TOOLS
@@ -655,7 +687,7 @@ def _tool_access(name: str) -> str:
     return "execute"
 
 
-def _tool_paths(name: str, inp: dict) -> list[str]:
+def _tool_paths(name: str, inp: dict, cwd: str | None = None) -> list[str]:
     """Paths referenced by a KNOWN tool's input. Unknown/MCP tools yield none by design."""
     if name not in _PATH_TOOLS or not isinstance(inp, dict):
         return []
@@ -664,6 +696,8 @@ def _tool_paths(name: str, inp: dict) -> list[str]:
         value = inp.get(key)
         if isinstance(value, str) and value.strip() and value not in paths:
             paths.append(value)
+    if not paths and name in _SEARCH_TOOLS and cwd:
+        paths.append(cwd)
     return paths
 
 
@@ -682,7 +716,7 @@ def _argv0_subcommand(command: str) -> tuple[str, str]:
     return argv0, sub
 
 
-def _tool_input(name: str, inp: dict) -> dict:
+def _tool_input(name: str, inp: dict, cwd: str | None = None) -> dict:
     """Allow-listed input for one Claude tool, keyed by the SHARED field names `_body_input`
     understands. `path`/`workdir` ride along unlisted so `_event_has_secret_path` can see them;
     `_body_input` drops them, because concrete paths belong on the indexed skeleton."""
@@ -703,14 +737,38 @@ def _tool_input(name: str, inp: dict) -> dict:
     elif name == "WebFetch":
         if isinstance(inp.get("url"), str):
             out["url"] = inp["url"]
-    elif isinstance(inp.get("command"), str):        # Bash, and anything else shell-shaped
+    elif name in _BASH_TOOLS and isinstance(inp.get("command"), str):
         out["command"] = inp["command"]
+        workdir = inp.get("workdir") if isinstance(inp.get("workdir"), str) else cwd
+        if workdir:
+            out["workdir"] = (workdir if os.path.isabs(workdir)
+                              else os.path.abspath(os.path.join(cwd or os.getcwd(), workdir)))
         argv0, sub = _argv0_subcommand(inp["command"])
         if argv0:
             out["argv0"] = argv0
         if sub:
             out["subcommand"] = sub
     return out
+
+
+def _bash_write_paths(inp: dict, cwd: str | None) -> list[str]:
+    """Concrete Bash write targets inferred by the shared conservative shell classifier."""
+    if not isinstance(inp, dict) or not isinstance(inp.get("command"), str):
+        return []
+    base = inp.get("workdir") if isinstance(inp.get("workdir"), str) else cwd
+    base = base or os.getcwd()
+    if not os.path.isabs(base):
+        base = os.path.abspath(os.path.join(cwd or os.getcwd(), base))
+    try:
+        import repo_activity  # noqa: PLC0415 — lazy import avoids capture's module cycle
+        accesses = repo_activity._accesses("Bash", inp, base)
+    except Exception:  # noqa: BLE001 — evidence inference must never break capture
+        return []
+    paths: list[str] = []
+    for path, access in accesses:
+        if access == "write" and path != base and path not in paths:
+            paths.append(path)
+    return paths
 
 
 def _tool_edits(name: str, inp: dict, ref: int) -> list[dict]:
@@ -896,7 +954,9 @@ def _new_turn(line: dict, user_text: str) -> dict:
             "thinking": [], "code_edits": [], "cwd": line.get("cwd"),
             "tool_events": [], "file_ops": [], "source_message_ids": [],
             "turn_meta": {}, "excluded": _is_login_command(user_text)}
-    uid = line.get("uuid")
+    message = line.get("message") if isinstance(line.get("message"), dict) else {}
+    message_id = message.get("id")
+    uid = message_id if isinstance(message_id, str) and message_id else line.get("uuid")
     if isinstance(uid, str) and uid:
         turn["source_message_ids"].append(uid)
     ts = line.get("timestamp")
@@ -928,12 +988,15 @@ def _absorb_tool_uses(turn: dict, pending: dict, line: dict, content: object) ->
         # VONIC_CAPTURE_FILES=0 means no file-path evidence at all: not the always-sent `files`
         # list, and not the structured path refs either. The tool skeleton itself survives — that
         # a Read ran is not a path — so the turn index stays useful with paths switched off.
-        paths = _tool_paths(name, inp) if _capture_files() else []
+        cwd = line.get("cwd") or turn.get("cwd")
+        paths = _tool_paths(name, inp, cwd) if _capture_files() else []
+        if name in _BASH_TOOLS and _capture_files():
+            paths = _bash_write_paths(inp, cwd)
         if paths:
             event["paths"] = paths
         # The raw input carries `path`/`workdir`/`command` for secret-path detection; only the
         # allow-listed subset survives `_body_input`, and only when commands capture is enabled.
-        raw_input = _tool_input(name, inp)
+        raw_input = _tool_input(name, inp, cwd)
         if raw_input:
             event["input"] = raw_input
         turn["tool_events"].append(event)
@@ -944,6 +1007,8 @@ def _absorb_tool_uses(turn: dict, pending: dict, line: dict, content: object) ->
         if name in _EDIT_TOOLS and paths:
             op = "created" if name in _CREATE_TOOLS else "modified"
             turn["file_ops"].append({"op": op, "path": paths[0]})
+        elif name in _BASH_TOOLS:
+            turn["file_ops"].extend({"op": "modified", "path": path} for path in paths)
         if _capture_code():
             turn["code_edits"].extend(_tool_edits(name, inp, order))
         tool_id = block.get("id")
@@ -1033,7 +1098,9 @@ def _parse_session(transcript_path: str, default_cwd: str | None = None) -> list
                 # Event identity material: the user message plus the prose-bearing assistant
                 # envelopes. `message.id` is server-issued and survives a transcript rewrite;
                 # the per-line uuid is the fallback.
-                ident = (line.get("message") or {}).get("id") or line.get("uuid")
+                message_id = (line.get("message") or {}).get("id")
+                ident = (message_id if isinstance(message_id, str) and message_id
+                         else line.get("uuid"))
                 if isinstance(ident, str) and ident and ident not in cur["source_message_ids"]:
                     cur["source_message_ids"].append(ident)
             for p in _tool_use_files(content):
@@ -1135,7 +1202,7 @@ def _plugin_version() -> str:
     verifiable (which cached copy actually fired), not just what `plugin list` claims.
 
     The deliverer is vendored into different layouts — Claude `.claude-plugin/`, Codex `.codex-plugin/`,
-    Opencode `package.json` — so try each manifest relative to this file's parent dir. Cached; best-effort
+    Cursor `.cursor-plugin/`, Opencode `package.json` — so try each manifest relative to this file's parent dir. Cached; best-effort
     ('?' if none found). The buffer copy rides to the backend in the free-form ``metadata`` bag as
     ``client_version``, feeding fleet/version reporting.
     """
@@ -1144,7 +1211,8 @@ def _plugin_version() -> str:
         return _PLUGIN_VERSION
     parent = _plugin_root()
     ver = "?"
-    for rel in (".claude-plugin/plugin.json", ".codex-plugin/plugin.json", "package.json"):
+    for rel in (".claude-plugin/plugin.json", ".codex-plugin/plugin.json",
+                ".cursor-plugin/plugin.json", "package.json"):
         try:
             with open(os.path.join(parent, rel), encoding="utf-8") as fh:
                 ver = json.load(fh).get("version") or "?"
@@ -1301,6 +1369,19 @@ _MAX_PATCH_BYTES = 16_000
 _MAX_EVIDENCE_BYTES = 90_000
 
 
+def _safe_wire_path(value: object) -> str | None:
+    """Normalize a structural path for the wire, rejecting absolute and escaping forms."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    raw = value.strip()
+    if os.path.isabs(raw) or ntpath.isabs(raw) or raw.startswith(("/", "\\")):
+        return None
+    normalized = posixpath.normpath(raw.replace("\\", "/"))
+    if normalized in ("", ".", "..") or normalized.startswith("../"):
+        return None
+    return normalized[:_MAX_PATH]
+
+
 def _body_cap(name: str, hard_max: int) -> int:
     """Config may tighten a body cap, never disable or raise its hard privacy/storage ceiling."""
     return max(1, min(_env_int(name, hard_max), hard_max))
@@ -1335,10 +1416,10 @@ def _turn_content(turn: dict) -> str:
 def _event_content(turn: dict):
     """The ``vonic_remember`` ``content`` for one turn.
 
-    Default (opt-in flags off, or nothing captured): a **bare prose string** — byte-identical to
-    what the whole fleet already sends, so the server's ``content: str`` path is unchanged.
+    With body flags disabled, or when no body survives: a **bare prose string** — byte-identical to
+    the historical payload, so the server's ``content: str`` path is unchanged.
 
-    When VONIC_CAPTURE_THINKING / VONIC_CAPTURE_CODE captured something, ``content`` is instead a
+    When enabled reasoning or default-on typed evidence captured something, ``content`` is instead a
     structured object ``{text_content, reasoning?, code_changes?}`` (Amitoj's shape): the prose
     stays in ``text_content`` — the only field the ingestion agent synthesises — while thinking and
     code ride along as sibling fields, stored verbatim and never fed to the LLM. Returns ``None``
@@ -1389,17 +1470,31 @@ def _remember_metadata(buf: dict, turn: dict, repo: str, branch: str, author: st
     if author_id:
         event["author_id"] = author_id
     changed = turn.get("changed_files")
-    if isinstance(changed, list) and changed:
-        event["changed_files"] = changed[:_MAX_CHANGED_FILES]
+    safe_changed: list[dict] = []
+    if isinstance(changed, list):
+        for item in changed:
+            if not isinstance(item, dict):
+                continue
+            path = _safe_wire_path(item.get("path"))
+            if path:
+                safe_changed.append({**item, "path": path})
+            if len(safe_changed) >= _MAX_CHANGED_FILES:
+                break
+    if safe_changed:
+        event["changed_files"] = safe_changed
     else:
         # Fallback for turns whose paths were never resolved (legacy buffers, adapters that send
         # only `files`). A structural wire path MUST be repository-relative: an absolute one is
         # this machine's directory layout, and a `..` escape is not in the event's repo at all.
         # The resolver drops such paths deliberately — dropping them here too stops the fallback
         # from re-introducing exactly what it dropped (e.g. a file outside any work tree).
-        files = [str(f)[:_MAX_PATH] for f in turn.get("files", []) if f
-                 and not os.path.isabs(str(f))
-                 and not str(f).startswith("..")][:_MAX_CHANGED_FILES]
+        files = []
+        for value in turn.get("files", []):
+            path = _safe_wire_path(value)
+            if path and path not in files:
+                files.append(path)
+            if len(files) >= _MAX_CHANGED_FILES:
+                break
         if files:
             event["changed_files"] = [{"path": f} for f in files]
     # Free-form bag: the session linkage that used to live in the page frontmatter.
@@ -2980,6 +3075,11 @@ def main() -> int:
 
     if os.environ.get("VONIC_CODECOLLAB_DISABLED") == "1":
         return 0
+    if host := foreign_host():
+        # Every hook mode below; `--deliver` above stays live so an already-spawned delivery of a
+        # genuine Claude Code buffer can still finish.
+        _debug(f"{mode or 'hook'}: Claude Code hook run by {host} — standing down")
+        return 0
 
     if mode == "sweep":
         # SessionStart: retry any buffers left with pending turns, then (once per
@@ -3010,6 +3110,12 @@ def main() -> int:
         event = json.load(sys.stdin)
     except (json.JSONDecodeError, ValueError) as exc:
         _debug(f"bad hook input: {exc}")
+        return 0
+
+    if mode in ("turn", "finalize") and hosted_by_opencode():
+        # Capture only: sweep (above) still delivers anything already buffered, and recall.py is
+        # untouched. The Opencode plugin records this conversation.
+        _debug(f"{mode}: Claude Code hosted by Opencode's bridge — Opencode captures this session")
         return 0
 
     if mode in ("turn", "finalize"):

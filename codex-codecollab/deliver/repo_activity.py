@@ -37,7 +37,7 @@ import capture  # noqa: E402 — reuse _git, the cache dir, and the human-prompt
 
 _READ = "read"
 _WRITE = "write"
-_READ_WRITE = "read_write"          # only ever an `access` value, never an access *mode*
+_READ_WRITE = "read_write"
 _DETACHED = "(detached)"
 _LABELS = {_READ: "read only", _WRITE: "write only", _READ_WRITE: "read + write"}
 
@@ -47,10 +47,7 @@ _PATH_KEYS = ("file_path", "notebook_path", "path")
 
 # Command chaining. Splitting here is naive by design: a segment we mis-split degrades to
 # "read of the cwd repo", never to a fabricated write.
-_SEGMENT_RE = re.compile(r"&&|\|\||[;|\n]")
-# `>` / `>>` but NOT `>&2` / `2>&1` — an fd dup is not a file write.
-_REDIRECT_RE = re.compile(r"^>>?(?!&)")
-
+_SEGMENT_RE = re.compile(r"&&|\|\||[;\n]|(?<!>)\|")
 # git subcommands that change the repository. Listing forms dominate `branch`/`tag`/`fetch`,
 # so those stay reads rather than over-claiming.
 _GIT_WRITE_SUBS = {
@@ -197,13 +194,46 @@ def _abspath(path: str, cwd: str) -> str:
     return os.path.normpath(path)
 
 
+# A here-document operator and its delimiter word: `<<EOF`, `<<-EOF`, `<< 'EOF'`, `<<"EOF"`. Not the
+# here-string `<<<`, whose operand is an ordinary word on the same line.
+_HEREDOC_RE = re.compile(r"(?<!<)<<(-?)[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2(?!<)")
+
+
+def _strip_heredocs(command: str) -> str:
+    """Drop here-document bodies, which are data (often code), not shell.
+
+    Parsing a body as commands turns its text into false evidence: `-> None:` or `x >= 2` in an
+    embedded Python script read as output redirects to files named `None:` or `=`. The operator is
+    removed from its line; every following line up to the delimiter line is dropped (`<<-` also
+    accepts a tab-indented delimiter). An unterminated body runs to the end of the command.
+    """
+    out: list[str] = []
+    pending: list[tuple[str, bool]] = []
+    for line in command.split("\n"):
+        if pending:
+            delimiter, tabs = pending[0]
+            if (line.lstrip("\t") if tabs else line).rstrip() == delimiter:
+                pending.pop(0)
+            continue
+        found = [(m.group(3), m.group(1) == "-") for m in _HEREDOC_RE.finditer(line)]
+        out.append(_HEREDOC_RE.sub(" ", line) if found else line)
+        pending.extend(found)
+    return "\n".join(out)
+
+
+def _unresolvable(word: str) -> bool:
+    """Shell expansion (`$VAR`, `$(…)`, backticks) or process substitution: not a concrete path."""
+    return any(marker in word for marker in ("$", "`", "<(", ">("))
+
+
 def _path_args(args: list[str], base: str) -> list[str]:
     """Arguments that are confidently paths: they contain a separator, or they name something
     that exists under `base`. A bare word that happens to be a filename is a harmless
-    over-match — it resolves to the same repo as `base` anyway."""
+    over-match — it resolves to the same repo as `base` anyway. Words that still need shell
+    expansion are never paths: `$L/repo` would otherwise resolve to a literal `./$L/repo`."""
     paths = []
     for arg in args:
-        if not arg or arg.startswith("-"):
+        if not arg or arg.startswith("-") or _unresolvable(arg):
             continue
         resolved = _abspath(arg, base)
         if os.sep in arg or os.path.exists(resolved):
@@ -211,25 +241,106 @@ def _path_args(args: list[str], base: str) -> list[str]:
     return paths
 
 
-def _split_redirects(tokens: list[str]) -> tuple[list[str], bool]:
-    """Strip `>`/`>>` operators, keeping their targets as ordinary path arguments."""
-    out: list[str] = []
+def _redirects(segment: str) -> tuple[bool, list[str]]:
+    """Find literal output-redirection targets without mistaking quoted `>` text for syntax."""
+    targets: list[str] = []
     writes = False
-    for tok in tokens:
-        match = _REDIRECT_RE.match(tok)
-        if not match:
-            out.append(tok)
+    quote: str | None = None
+    escaped = False
+    conditional_end: str | None = None
+    i = 0
+    while i < len(segment):
+        char = segment[i]
+        if escaped:
+            escaped = False
+            i += 1
+            continue
+        if char == "\\" and quote != "'":
+            escaped = True
+            i += 1
+            continue
+        if quote:
+            if char == quote:
+                quote = None
+            i += 1
+            continue
+        if conditional_end:
+            if segment.startswith(conditional_end, i):
+                conditional_end = None
+                i += 2
+            else:
+                i += 1
+            continue
+        if segment.startswith("[[", i):
+            conditional_end = "]]"
+            i += 2
+            continue
+        if segment.startswith("((", i):
+            conditional_end = "))"
+            i += 2
+            continue
+        if char in ("'", '"'):
+            quote = char
+            i += 1
+            continue
+        if char != ">":
+            i += 1
+            continue
+        # `>(command)` is process substitution, not a filesystem redirect target.
+        if i + 1 < len(segment) and segment[i + 1] == "(":
+            i += 2
+            continue
+        # >&2 and 2>&1 duplicate descriptors; they do not write a file.
+        if i + 1 < len(segment) and segment[i + 1] == "&":
+            i += 2
             continue
         writes = True
-        rest = tok[match.end():]
-        if rest:
-            out.append(rest)
-    return out, writes
+        i += 2 if i + 1 < len(segment) and segment[i + 1] == ">" else 1
+        if i < len(segment) and segment[i] == "|":  # noclobber override: >| file
+            i += 1
+        while i < len(segment) and segment[i].isspace():
+            i += 1
+        if i >= len(segment):
+            continue
+        target_chars: list[str] = []
+        target_quote: str | None = None
+        target_escaped = False
+        while i < len(segment):
+            char = segment[i]
+            if target_escaped:
+                target_chars.append(char)
+                target_escaped = False
+                i += 1
+                continue
+            if char == "\\" and target_quote != "'":
+                target_escaped = True
+                i += 1
+                continue
+            if target_quote:
+                if char == target_quote:
+                    target_quote = None
+                else:
+                    target_chars.append(char)
+                i += 1
+                continue
+            if char in ("'", '"'):
+                target_quote = char
+                i += 1
+                continue
+            if char.isspace() or char in ";|&<>":
+                break
+            target_chars.append(char)
+            i += 1
+        target = "".join(target_chars)
+        # Unresolved shell expansion is not a concrete path and must not become structural evidence.
+        if target and not any(char in target for char in "$`*?[]{}") and not target.startswith("~"):
+            targets.append(target)
+    return writes, targets
 
 
-def _classify(tokens: list[str], base: str) -> tuple[str, list[str]]:
+def _classify(tokens: list[str], base: str, redirected: bool = False,
+              redirect_targets: list[str] | None = None) -> tuple[str, list[str]]:
     """One command segment -> (mode, paths). Unrecognised commands are reads of `base`."""
-    tokens, redirected = _split_redirects(tokens)
     if not tokens:
         return (_WRITE if redirected else _READ), [base]
     head = os.path.basename(tokens[0])
@@ -261,7 +372,9 @@ def _classify(tokens: list[str], base: str) -> tuple[str, list[str]]:
         mode = _WRITE
     elif head in ("sed", "perl", "ruby") and any(a.startswith("-i") for a in args):
         mode = _WRITE
-    return mode, _path_args(args, base) or [base]
+    paths = [_abspath(path, base) for path in (redirect_targets or [])]
+    paths.extend(path for path in _path_args(args, base) if path not in paths)
+    return mode, paths or [base]
 
 
 def _bash_accesses(command: str, cwd: str) -> list[tuple[str, str]]:
@@ -272,10 +385,11 @@ def _bash_accesses(command: str, cwd: str) -> list[tuple[str, str]]:
     """
     accesses: list[tuple[str, str]] = []
     base = cwd or os.getcwd()
-    for segment in _SEGMENT_RE.split(command):
+    for segment in _SEGMENT_RE.split(_strip_heredocs(command)):
         segment = segment.strip()
         if not segment:
             continue
+        redirected, redirect_targets = _redirects(segment)
         try:
             tokens = shlex.split(segment)
         except ValueError:
@@ -283,10 +397,10 @@ def _bash_accesses(command: str, cwd: str) -> list[tuple[str, str]]:
         if not tokens:
             continue
         if os.path.basename(tokens[0]) == "cd":
-            if len(tokens) > 1:  # moves the base for the rest of the chain
+            if len(tokens) > 1 and not _unresolvable(tokens[1]):  # moves the base for the chain
                 base = _abspath(tokens[1], base)
             continue
-        mode, paths = _classify(tokens, base)
+        mode, paths = _classify(tokens, base, redirected, redirect_targets)
         accesses.extend((path, mode) for path in paths)
     return accesses
 
@@ -407,7 +521,10 @@ def _aggregate(accesses: list[tuple[str, str]],
             orphans.add(path)
             continue
         flags = repos.setdefault((root, resolver.branch(root)), {_READ: False, _WRITE: False})
-        flags[mode] = True
+        if mode == _READ_WRITE:
+            flags[_READ] = flags[_WRITE] = True
+        else:
+            flags[mode] = True
     return repos, len(orphans)
 
 
@@ -447,7 +564,7 @@ def resolve_accesses(accesses: list[dict] | None, default_cwd: str,
     """Resolve a privacy-reduced path-access list supplied by a non-Claude adapter.
 
     Adapters must discard raw tool arguments before this boundary and provide only
-    ``{"path": str, "access": "read" | "write"}``. Local paths are used to discover git
+    ``{"path": str, "access": "read" | "write" | "read_write"}``. Local paths discover git
     identities, then `_attach_repo_activity` strips them from wire metadata exactly as it does for
     transcript-derived activity.
     """

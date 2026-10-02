@@ -25,7 +25,7 @@ CLIENT_INFO = {"name": "codecollab", "version": "0.4.0"}
 
 _ACCEPTANCE = {"accepted", "rejected"}
 _STATES = {"pending", "terminal"}
-_OPERATIONS = {"vonic_query", "vonic_remember"}
+_OPERATIONS = {"vonic_query", "vonic_remember", "becos_backfill_upload"}
 _OUTCOMES = {
     "answered", "no_evidence", "succeeded", "partial", "skipped", "conflict", "failed",
     "unknown",
@@ -41,6 +41,16 @@ _RECEIPT_FIELDS = {
 _AUDIT_SECRET_KEYS = frozenset({
     "authorization", "token", "access_token", "client_secret", "password", "api_key",
 })
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Expose redirects to `_post` so credentials are never forwarded implicitly."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_NO_REDIRECT_OPENER = urllib.request.build_opener(_NoRedirectHandler)
 
 
 def _audit_log_path() -> str:
@@ -258,6 +268,25 @@ def _parse_body(content_type: str, raw: bytes) -> list[dict]:
     return messages
 
 
+def _same_origin(source: str, target: str) -> bool:
+    """Return whether two absolute HTTP(S) URLs have the same security origin."""
+    origins = []
+    for url in (source, target):
+        try:
+            parsed = urllib.parse.urlsplit(url)
+            scheme = parsed.scheme.lower()
+            hostname = parsed.hostname
+            port = parsed.port
+        except ValueError:
+            return False
+        if scheme not in ("http", "https") or not hostname:
+            return False
+        if port is None:
+            port = 443 if scheme == "https" else 80
+        origins.append((scheme, hostname.lower(), port))
+    return origins[0] == origins[1]
+
+
 def _post(
     url: str,
     token: str,
@@ -282,18 +311,22 @@ def _post(
         url, data=json.dumps(message).encode("utf-8"), method="POST", headers=headers
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with _NO_REDIRECT_OPENER.open(req, timeout=timeout) as resp:
             raw = resp.read()
             sid = resp.headers.get("Mcp-Session-Id") or session_id
             return _parse_body(resp.headers.get("Content-Type", ""), raw), sid
     except urllib.error.HTTPError as exc:
-        # Follow 307/308 (urllib will not re-POST on its own) — e.g. /mcp -> /mcp/.
-        if exc.code in (307, 308) and _redirects > 0:
+        # Re-POST redirects only after validating their destination. The no-redirect opener above
+        # also exposes 301/302/303 here instead of letting urllib forward credentials implicitly.
+        # A 303 changes the request to GET by definition, which this POST-only MCP transport does
+        # not implement. Replaying the body would duplicate a potentially side-effecting call.
+        if exc.code in (301, 302, 307, 308) and _redirects > 0:
             location = exc.headers.get("Location")
             if location:
                 target = urllib.parse.urljoin(url, location)
-                return _post(target, token, session_id, message, timeout,
-                             extra_headers=extra_headers, _redirects=_redirects - 1)
+                if _same_origin(url, target):
+                    return _post(target, token, session_id, message, timeout,
+                                 extra_headers=extra_headers, _redirects=_redirects - 1)
         raise
 
 

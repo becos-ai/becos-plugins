@@ -35,7 +35,7 @@ import capture  # noqa: E402 — reuse becos config + identity resolution
 import gbrain_client  # noqa: E402
 import recall  # noqa: E402 — reuse the response-text extraction
 
-_TIMEOUT = float(os.environ.get("VONIC_RECALL_TIMEOUT", "20"))
+_TIMEOUT = recall._TIMEOUT
 _LOGCHARS = int(os.environ.get("VONIC_RESOLVE_LOGCHARS", "500"))
 
 # Field order for rendering an event record; anything else the server returns is printed after.
@@ -94,7 +94,12 @@ def _log(event_id: str, outcome: str, evidence: dict | None = None) -> None:
         os.makedirs(directory, exist_ok=True)
         stamp = time.strftime("%Y-%m-%dT%H:%M:%S")
         tag = os.environ.get("VONIC_CODECOLLAB_CLIENT_TAG", "cc")
-        line = f"{stamp}  {tag}/v{capture._plugin_version()}  event_id={event_id} outcome={outcome}"
+        safe_event_id = "".join(
+            " " if ord(char) < 32 or 127 <= ord(char) <= 159 else char
+            for char in str(event_id)
+        )
+        line = (f"{stamp}  {tag}/v{capture._plugin_version()}  "
+                f"event_id={safe_event_id} outcome={outcome}")
         if evidence is not None:
             line += f"  ::  {_one_line(evidence)[:_LOGCHARS]}"
         with open(os.path.join(directory, "resolve.log"), "a", encoding="utf-8") as handle:
@@ -110,18 +115,27 @@ def _record(result: dict) -> dict | None:
     answer, whereas this tool returns the record itself (or null). Anything that is not a
     non-empty object -- null, a bare value, malformed JSON -- means "not in scope".
     """
-    parts = [
-        item.get("text", "")
-        for item in result.get("content", [])
-        if isinstance(item, dict) and item.get("type") == "text"
-    ]
-    payload = "\n".join(part for part in parts if part).strip()
-    if not payload:
+    if not isinstance(result, dict) or result.get("isError") is True:
         return None
-    try:
-        evidence = json.loads(payload)
-    except (ValueError, TypeError):
-        return None
+    if "structuredContent" in result:
+        structured = result.get("structuredContent")
+        receipt_keys = {"operation", "request_id", "acceptance", "state", "condition", "retryable"}
+        if not isinstance(structured, dict) or receipt_keys.issubset(structured):
+            return None
+        evidence = structured
+    else:
+        parts = [
+            item.get("text", "")
+            for item in result.get("content", [])
+            if isinstance(item, dict) and item.get("type") == "text"
+        ]
+        payload = "\n".join(part for part in parts if part).strip()
+        if not payload:
+            return None
+        try:
+            evidence = json.loads(payload)
+        except (ValueError, TypeError):
+            return None
     if isinstance(evidence, dict) and "result" in evidence:  # tolerate a wrapped result
         evidence = evidence["result"]
     return evidence if isinstance(evidence, dict) and evidence else None

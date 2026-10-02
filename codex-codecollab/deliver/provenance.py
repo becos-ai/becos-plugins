@@ -73,7 +73,9 @@ Examples:
 # `additionalContext` verbatim as the recalled-memory digest (and renders it in the visible
 # `codecollab_recall` tool), so prepending the grammar here would both duplicate it and pollute
 # that digest. Claude Code and Codex have no such path: the hook is their only channel.
-_SELF_INJECTING_RUNTIMES = frozenset({"oc"})
+# Cursor (`cur`) is the same case by another route: its plugin carries all three texts in an
+# always-applied rule, and its `codecollab_recall` tool returns this hook's output as the digest.
+_SELF_INJECTING_RUNTIMES = frozenset({"oc", "cur"})
 
 
 def is_provenance_enabled(env: Mapping[str, str] | None = None) -> bool:
