@@ -63,10 +63,30 @@ SESSION_REMINDER = (
     "a grade line after any turn that carries recalled memory."
 )
 
-# Entity history (entity_history.py): added to the session-start texts only when that feature is on.
-ENTITY_HISTORY_INSTRUCTIONS = """\
+# Entity history (entity_history.py): one paragraph, added only when that feature is on. Worded per
+# runtime, because what delivers a file's history — and so how the model can ask for one — differs:
+# Claude Code: a Read (or a one-time edit denial); Codex: only a one-time `apply_patch` denial
+# (reads go through the shell); Cursor/Opencode: a read, or a `codecollab_recall` query naming the
+# path. Opencode mirrors the `oc` text in src/provenance.ts (a test pins the copy).
+_ENTITY_HISTORY_HEAD = """\
 ## File history
-An `<entity-history>` block (after a file read, or as a one-time edit denial) lists that file's recorded decisions, constraints and rejected approaches, newest first. Treat it as recalled evidence: respect current constraints, don't repeat rejected approaches, then retry any denied edit."""
+An `<entity-history>` block lists one file's recorded decisions, constraints, rejected approaches and superseded states, newest first, with `### symbol` sections for symbols in it. Treat it as recalled evidence: respect current constraints and don't repeat rejected approaches. """
+ENTITY_HISTORY_INSTRUCTIONS = _ENTITY_HISTORY_HEAD + """\
+It arrives once per file per session: with the first read of the file, or as a one-time denial of an edit to a file you have not read, in which case retry the same edit and it goes through. To see a file's history before deciding how to change it, read the file first. A prompt that names a repository-relative path or `path::Symbol` also brings that file's history into recalled memory."""
+_ENTITY_HISTORY_CODEX = _ENTITY_HISTORY_HEAD + """\
+It arrives once per file per session, as a one-time denial of the first `apply_patch` that updates or deletes a file whose history you have not been shown (at most three files per denial). Read it, adjust the patch if needed, and apply it again; it will not be denied again for those files. A prompt that names a repository-relative path or `path::Symbol` also brings that file's history into recalled memory."""
+_ENTITY_HISTORY_TOOL = _ENTITY_HISTORY_HEAD + """\
+It arrives once per file per session: with the first read of the file, or as a one-time denial of an edit to a file you have not read, in which case retry the same edit and it goes through. To get a file's or symbol's history on demand, call `codecollab_recall` with a `query` that names its exact repository-relative path or `path::Symbol` (e.g. `history of src/app/store.py::Store.save`); the result then carries a `History of …` section."""
+_ENTITY_HISTORY_BY_TAG = {"cx": _ENTITY_HISTORY_CODEX, "cur": _ENTITY_HISTORY_TOOL,
+                          "oc": _ENTITY_HISTORY_TOOL}
+
+
+def entity_history_instructions(env: Mapping[str, str] | None = None) -> str:
+    """The file-history paragraph for this runtime (``VONIC_CODECOLLAB_CLIENT_TAG``)."""
+    source = os.environ if env is None else env
+    tag = (source.get("VONIC_CODECOLLAB_CLIENT_TAG") or "cc").strip()
+    return _ENTITY_HISTORY_BY_TAG.get(tag, ENTITY_HISTORY_INSTRUCTIONS)
+
 
 _MODES = frozenset({"compact", "legacy"})
 
@@ -96,13 +116,16 @@ def session_instructions(env: Mapping[str, str] | None = None) -> str:
     parts = [text for text, on in ((prov, is_provenance_enabled(env)),
                                    (feedback, is_recall_feedback_enabled(env)),
                                    (resolve, is_resolve_tool_enabled(env)),
-                                   (ENTITY_HISTORY_INSTRUCTIONS, is_entity_history_enabled(env)))
+                                   (entity_history_instructions(env),
+                                    is_entity_history_enabled(env)))
              if on]
     return "\n\n".join(parts)
 
 
 def is_entity_history_enabled(env: Mapping[str, str] | None = None) -> bool:
-    """``VONIC_CODECOLLAB_ENTITY_HISTORY=1`` (off by default; see entity_history.py)."""
+    """``VONIC_CODECOLLAB_ENTITY_HISTORY=1`` (off by default; see entity_history.py). Applies in
+    both instruction modes: legacy has no session-start texts, so ``recall.py`` sends the paragraph
+    with each prompt there (on runtimes where the hook is the instruction channel)."""
     source = os.environ if env is None else env
     return (source.get("VONIC_CODECOLLAB_ENTITY_HISTORY") or "").strip() == "1"
 
@@ -175,6 +198,13 @@ Examples:
 # Cursor (`cur`) is the same case by another route: its plugin returns all three texts from its
 # `sessionStart` hook, and its `codecollab_recall` tool returns this hook's output as the digest.
 _SELF_INJECTING_RUNTIMES = frozenset({"oc", "cur"})
+
+
+def hook_injects_instructions(env: Mapping[str, str] | None = None) -> bool:
+    """Whether this runtime's instruction texts come from the shared hooks (Claude Code, Codex) rather
+    than its own adapter (see `_SELF_INJECTING_RUNTIMES`)."""
+    source = os.environ if env is None else env
+    return source.get("VONIC_CODECOLLAB_CLIENT_TAG", "cc") not in _SELF_INJECTING_RUNTIMES
 
 
 def is_provenance_enabled(env: Mapping[str, str] | None = None) -> bool:
