@@ -24,6 +24,22 @@
         ]
       }
     ],
+    "PostToolUse": [
+      {
+        "matcher": "Read",
+        "hooks": [
+          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/entity_history.py\" post-read", "timeout": 12 }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [
+          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/entity_history.py\" pre-edit", "timeout": 12 }
+        ]
+      }
+    ],
     "SessionEnd": [
       {
         "hooks": [

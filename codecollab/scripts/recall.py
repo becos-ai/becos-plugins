@@ -169,6 +169,25 @@ _LEADING_HANDOFF_RE = re.compile(
 )
 
 
+_HISTORY_SECTION_RE = re.compile(r"^History of (?P<path>[^\s:]+(?:\:[^\s:]+)*?)(?:::\S+)? \(",
+                                 re.M)
+
+
+def _note_entity_history(answer: str, session_id: str | None) -> None:
+    """Mark files whose history this prompt's recall already carried, so the read/edit hooks
+    (entity_history.py) do not show the same file history again this session. Best-effort."""
+    if not session_id or "History of " not in answer:
+        return
+    try:
+        import entity_history
+        if not entity_history.enabled():
+            return
+        paths = [m.group("path") for m in _HISTORY_SECTION_RE.finditer(answer)]
+        entity_history.mark_delivered(session_id, paths)
+    except Exception as exc:  # noqa: BLE001 — never affects recall
+        _debug(f"entity history note: {exc}")
+
+
 def _strip_handoff(prompt: str) -> str:
     """`prompt` without a leading `<repository-handoff>` block: the text recall searches on."""
     return _LEADING_HANDOFF_RE.sub("", prompt, count=1)
@@ -595,6 +614,7 @@ def main() -> int:
     _log(f"inject  {len(answer)}c  prompt={prompt[:60]!r}  ::  {snippet}")
 
     parts.append(_wrap(answer, scope))   # explicit provenance — see _emit_context
+    _note_entity_history(answer, payload.get("session_id"))
     if legacy:
         # Legacy: ask for a relevance/tokens-saved grade, but ONLY here, the one path where memory
         # was actually recalled, after the digest so the thing being graded is in view. Resolve
