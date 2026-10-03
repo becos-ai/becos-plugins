@@ -567,6 +567,11 @@ def main() -> int:
     if legacy:
         if provenance.is_provenance_enabled():
             parts.append(prov_text)
+        # Legacy delivers nothing at session start, so the file-history paragraph rides each prompt
+        # too — only where this hook is the instruction channel (not Opencode/Cursor, which inject
+        # their own texts).
+        if provenance.is_entity_history_enabled() and provenance.hook_injects_instructions():
+            parts.append(provenance.entity_history_instructions())
     elif provenance.session_reminder():
         parts.append(provenance.session_reminder())
 
