@@ -52,6 +52,19 @@
         ]
       }
     ],
+    "PreToolUse": [
+      {
+        "matcher": "^apply_patch$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -lc 'set -a; [ -f \"$HOME/.codex/codecollab.env\" ] && . \"$HOME/.codex/codecollab.env\" >/dev/null 2>&1; set +a; export VONIC_CODECOLLAB_CLIENT_TAG=cx; exec python3 \"${PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/hooks/codex_entity_history.py\"'",
+            "timeout": 15,
+            "statusMessage": "codecollab: checking file history"
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [

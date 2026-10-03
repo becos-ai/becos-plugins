@@ -63,6 +63,11 @@ SESSION_REMINDER = (
     "a grade line after any turn that carries recalled memory."
 )
 
+# Entity history (entity_history.py): added to the session-start texts only when that feature is on.
+ENTITY_HISTORY_INSTRUCTIONS = """\
+## File history
+An `<entity-history>` block (after a file read, or as a one-time edit denial) lists that file's recorded decisions, constraints and rejected approaches, newest first. Treat it as recalled evidence: respect current constraints, don't repeat rejected approaches, then retry any denied edit."""
+
 _MODES = frozenset({"compact", "legacy"})
 
 
@@ -90,8 +95,16 @@ def session_instructions(env: Mapping[str, str] | None = None) -> str:
     prov, feedback, resolve = instruction_texts(env)
     parts = [text for text, on in ((prov, is_provenance_enabled(env)),
                                    (feedback, is_recall_feedback_enabled(env)),
-                                   (resolve, is_resolve_tool_enabled(env))) if on]
+                                   (resolve, is_resolve_tool_enabled(env)),
+                                   (ENTITY_HISTORY_INSTRUCTIONS, is_entity_history_enabled(env)))
+             if on]
     return "\n\n".join(parts)
+
+
+def is_entity_history_enabled(env: Mapping[str, str] | None = None) -> bool:
+    """``VONIC_CODECOLLAB_ENTITY_HISTORY=1`` (off by default; see entity_history.py)."""
+    source = os.environ if env is None else env
+    return (source.get("VONIC_CODECOLLAB_ENTITY_HISTORY") or "").strip() == "1"
 
 
 def session_reminder(env: Mapping[str, str] | None = None) -> str:
