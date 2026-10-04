@@ -45,8 +45,9 @@ DEFAULT_TIMEOUT = 8.0
 MAX_ATTEMPTS = 2            # an erroring lookup is retried once on a later read/edit
 _PENDING_STALE_S = 60.0
 _STATE_MAX_AGE_S = 7 * 86_400
-# Opening of vonic_agent's ENTITY_HISTORY_HEADER (api/memory_routing.py); pinned by tests on both
-# sides. Matched as a header so an answer that is ONLY the header still counts as empty.
+# Opening of vonic_agent's ENTITY_HISTORY_HEADER (api/memory_routing.py). Used only by the
+# cross-repo header pin test; NOT used to decide emptiness (see _is_empty: the receipt decides,
+# and only an exact server sentinel counts as empty).
 ENTITY_HISTORY_HEADER_OPENING = "recalled from captured coding sessions"
 RETRY_LINE = ("CodeCollab showed this file's recorded history once instead of applying the edit. "
               "Take it into account, then retry the edit; it will not be blocked again.")
@@ -239,11 +240,8 @@ def release(session_id: str, paths: list[str]) -> None:
 # ── lookup ───────────────────────────────────────────────────────────────────
 
 def _is_empty(answer: str) -> bool:
-    text = answer.strip().lower()
-    if text.startswith(ENTITY_HISTORY_HEADER_OPENING):
-        _, sep, rest = text.partition("\n\n")
-        text = rest.strip() if sep else ""
-    return len(text) < 12 or any(s in text for s in recall._SERVER_SENTINELS)
+    """Only an exact known server non-answer is empty; receipts decide everything else."""
+    return answer.strip().lower() in recall._SERVER_SENTINELS
 
 
 def fetch(path: str, cwd: str, session_id: str | None) -> str | None:

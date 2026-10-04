@@ -9,9 +9,12 @@ vendored ``cx_backfill.py`` and show its output. The dependable path stays the t
 (``codecollab-cx backfill``); this just makes it reachable from inside a Codex chat, one-step.
 
 We bake the ABSOLUTE plugin path + an env-sourcing ``bash -lc`` wrapper (the same one hooks.json uses)
-into the installed SKILL.md, so a Finder-launched minimal PATH can't break it. Idempotent + version
-marked: re-install only when the marker/version changes. Fail-open: any error is swallowed so a
-capture hook is never blocked.
+into the installed SKILL.md, so a Finder-launched minimal PATH can't break it. Idempotent: the full
+expected SKILL.md is rendered on every call and the file is rewritten only when the installed content
+differs from it byte-for-byte — so a plugin upgrade (new version-pinned cache root) or any template
+change regenerates it, and an unchanged install is never touched. The version marker identifies the
+file as ours (legacy-migration safety); it does not by itself gate regeneration. Fail-open: any error
+is swallowed so a capture hook is never blocked.
 """
 from __future__ import annotations
 
@@ -95,15 +98,22 @@ run and said yes.**
 """
 
 
+def _write_if_changed(dest: Path, rendered: str) -> None:
+    """Write ``rendered`` to ``dest`` unless it already holds exactly that content. Raises on I/O
+    errors — callers are fail-open."""
+    if dest.exists() and dest.read_text("utf-8") == rendered:
+        return  # current — nothing to do
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(rendered, "utf-8")
+
+
 def ensure_backfill_skill(plugin_root: Path) -> None:
-    """Write ~/.codex/skills/codecollab-backfill/SKILL.md if missing or out of date. Fail-open."""
+    """Write ~/.codex/skills/codecollab-backfill/SKILL.md if missing or its content differs from the
+    current rendering (e.g. the plugin root moved to a new cache version). Fail-open."""
     try:
         _migrate_old_skill("backfill", "codecollab-backfill-skill")  # drop the un-namespaced skill
-        dest = _skills_root() / "codecollab-backfill" / "SKILL.md"
-        if dest.exists() and MARKER in dest.read_text("utf-8"):
-            return  # current — nothing to do
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(_render(plugin_root), "utf-8")
+        rendered = _render(plugin_root)
+        _write_if_changed(_skills_root() / "codecollab-backfill" / "SKILL.md", rendered)
     except Exception:  # noqa: BLE001 — never block a capture hook
         pass
 
@@ -122,8 +132,9 @@ def _render_login(plugin_root: Path) -> str:
     the browser flow, so the in-chat path is now complete on a virgin machine.
 
     No gateway/becos URL is passed: the CLI carries the production defaults, so the user supplies
-    nothing. The plugin root is baked in absolutely (and re-baked whenever LOGIN_TEMPLATE_VERSION
-    changes), so the version-pinned cache path never reaches the user. Env-sourcing wrapper is the
+    nothing. The plugin root is baked in absolutely and the file is re-written whenever its rendered
+    content changes — a new plugin root (cache version) or a template edit — so the version-pinned
+    cache path never reaches the user and never goes stale. Env-sourcing wrapper is the
     same one hooks.json uses — the `[ -f ]` guard makes it a no-op on a first run, when there is no
     env file yet."""
     cli = plugin_root / "bin" / "codecollab-cx"
@@ -186,13 +197,11 @@ verifier, or pending-state contents.
 
 
 def ensure_login_skill(plugin_root: Path) -> None:
-    """Write ~/.codex/skills/codecollab-login/SKILL.md if missing or out of date. Fail-open."""
+    """Write ~/.codex/skills/codecollab-login/SKILL.md if missing or its content differs from the
+    current rendering (e.g. the plugin root moved to a new cache version). Fail-open."""
     try:
         _migrate_old_skill("login", "codecollab-login-skill")  # drop the un-namespaced skill
-        dest = _skills_root() / "codecollab-login" / "SKILL.md"
-        if dest.exists() and LOGIN_MARKER in dest.read_text("utf-8"):
-            return  # current — nothing to do
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(_render_login(plugin_root), "utf-8")
+        rendered = _render_login(plugin_root)
+        _write_if_changed(_skills_root() / "codecollab-login" / "SKILL.md", rendered)
     except Exception:  # noqa: BLE001 — never block a capture hook
         pass
