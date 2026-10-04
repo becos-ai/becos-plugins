@@ -32,7 +32,9 @@ Env:
                          so a feature branch still recalls the repo's history · "off" disable
                          recall (an unscoped query would hit the general brain, so it is skipped).
   VONIC_RECALL_TIMEOUT   seconds for the vonic_query call (default 20).
-  VONIC_RECALL_MAXCHARS  cap on injected chars (default 12000, hard maximum 20000).
+  VONIC_RECALL_MAXCHARS  cap on injected chars (default 12000, hard maximum 20000). On Claude Code
+                         the whole hook output is also held to 9500 chars (_CLAUDE_HOOK_BUDGET),
+                         below the host's ~10,000-char inline limit.
   VONIC_RECALL_LOGCHARS  chars of the recalled response logged per run (default 500).
   VONIC_CODECOLLAB_DEBUG "1" to log failures + injected-response snippets to
                          ~/.cache/codecollab/recall.log (and failures to stderr).
@@ -60,6 +62,11 @@ import provenance  # noqa: E402 — repo-provenance citation grammar
 
 _DEFAULT_MAXCHARS = 12000
 _HARD_MAXCHARS = 20000
+# Claude Code moves a hook's additionalContext over ~10,000 chars to a file and shows the model only
+# a ~2 KB preview, so on Claude Code (tag cc) the WHOLE per-turn string (reminder, wrapped digest,
+# legacy feedback/resolve texts) is held to this budget, whatever VONIC_RECALL_MAXCHARS says. Other
+# runtimes inject through their own channels and keep the VONIC_RECALL_MAXCHARS cap alone.
+_CLAUDE_HOOK_BUDGET = 9500
 _DEFAULT_TIMEOUT = 20.0
 _DEFAULT_LOGCHARS = 500
 _DEFAULT_NOTIFY_INTERVAL = 3600.0
@@ -101,7 +108,11 @@ def _truncate_answer(answer: str, cap: int) -> str:
     marker = f"\n…[truncated to {cap} chars]"
     if len(marker) > cap:
         marker = "…"[:cap]
-    return answer[:cap - len(marker)] + marker
+    keep = answer[:cap - len(marker)]
+    cut = keep.rfind("\n")
+    if cut >= len(keep) // 2:  # end on a whole entry unless that would drop over half the budget
+        keep = keep[:cut]
+    return keep + marker
 
 
 _TIMEOUT = _parse_positive_float(os.environ.get("VONIC_RECALL_TIMEOUT"), _DEFAULT_TIMEOUT)
@@ -614,21 +625,28 @@ def main() -> int:
     if not answer:
         _log(f"empty   prompt={prompt[:60]!r}")
         return _flush()
-    answer = _truncate_answer(answer, _MAXCHARS)
-    snippet = " ".join(answer.split())[:_LOGCHARS]
-    _log(f"inject  {len(answer)}c  prompt={prompt[:60]!r}  ::  {snippet}")
-
-    parts.append(_wrap(answer, scope))   # explicit provenance — see _emit_context
-    _note_entity_history(answer, payload.get("session_id"))
+    tail: list[str] = []
     if legacy:
         # Legacy: ask for a relevance/tokens-saved grade, but ONLY here, the one path where memory
         # was actually recalled, after the digest so the thing being graded is in view. Resolve
         # guidance rides the same precondition. In compact mode both are standing rules delivered
         # at session start, worded to apply only to turns that carry a <recalled-memory> block.
         if provenance.is_recall_feedback_enabled():
-            parts.append(feedback_text)
+            tail.append(feedback_text)
         if provenance.is_resolve_tool_enabled():
-            parts.append(resolve_text)
+            tail.append(resolve_text)
+    cap = _MAXCHARS
+    if is_claude:
+        # Everything but the digest itself, joined exactly as _flush joins it.
+        overhead = len("\n\n".join([*parts, _wrap("", scope), *tail]))
+        cap = max(1, min(cap, _CLAUDE_HOOK_BUDGET - overhead))
+    answer = _truncate_answer(answer, cap)
+    snippet = " ".join(answer.split())[:_LOGCHARS]
+    _log(f"inject  {len(answer)}c  prompt={prompt[:60]!r}  ::  {snippet}")
+
+    parts.append(_wrap(answer, scope))   # explicit provenance — see _emit_context
+    _note_entity_history(answer, payload.get("session_id"))
+    parts.extend(tail)
     return _flush()
 
 
