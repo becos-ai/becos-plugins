@@ -88,6 +88,50 @@ def entity_history_instructions(env: Mapping[str, str] | None = None) -> str:
     return _ENTITY_HISTORY_BY_TAG.get(tag, ENTITY_HISTORY_INSTRUCTIONS)
 
 
+# Team activity (team_activity.py -> vonic_team_activity): one paragraph telling the agent where
+# "who did what" questions are answered. Claude Code runs the script (absolute path, since
+# ${CLAUDE_PLUGIN_ROOT} is not set in the agent's own shell); Opencode calls its `codecollab_team`
+# tool and mirrors that text in src/provenance.ts (a test pins the copy). Codex and Cursor get no
+# paragraph until their command/tool ships.
+_TEAM_ACTIVITY_HEAD = """\
+## Team activity
+For questions about what a person or the team did, decided or changed, or who is working on what \
+(e.g. "what did nikhil do today?", "what changed in <repo> this week?", "who is working on \
+<topic>?"), """
+_TEAM_ACTIVITY_TAIL = """\
+ It searches captured coding sessions across the team's repositories and returns facts and \
+decisions with their author, repository and time. Answer from that result first and say so; git \
+history is a secondary source (it misses discussions, decisions and uncommitted work) — label \
+anything taken from it."""
+_TEAM_ACTIVITY_TOOL = _TEAM_ACTIVITY_HEAD + (
+    "call the `codecollab_team` tool with the user's question verbatim." + _TEAM_ACTIVITY_TAIL)
+
+
+def _team_activity_cc() -> str:
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "team_activity.py")
+    return _TEAM_ACTIVITY_HEAD + (
+        f'run `python3 "{script}" -` with the Bash tool, giving the user\'s question verbatim on '
+        "stdin (a quoted heredoc), never interpolated into the command line."
+        + _TEAM_ACTIVITY_TAIL)
+
+
+def team_activity_instructions(env: Mapping[str, str] | None = None) -> str:
+    """The team-activity paragraph for this runtime, or ``""`` where it has no entry point yet."""
+    source = os.environ if env is None else env
+    tag = (source.get("VONIC_CODECOLLAB_CLIENT_TAG") or "cc").strip()
+    if tag == "cc":
+        return _team_activity_cc()
+    if tag == "oc":
+        return _TEAM_ACTIVITY_TOOL
+    return ""
+
+
+def is_team_activity_enabled(env: Mapping[str, str] | None = None) -> bool:
+    """On by default; ``VONIC_CODECOLLAB_TEAM_ACTIVITY=0`` drops the paragraph."""
+    source = os.environ if env is None else env
+    return (source.get("VONIC_CODECOLLAB_TEAM_ACTIVITY") or "1").strip() != "0"
+
+
 _MODES = frozenset({"compact", "legacy"})
 
 
@@ -117,8 +161,10 @@ def session_instructions(env: Mapping[str, str] | None = None) -> str:
                                    (feedback, is_recall_feedback_enabled(env)),
                                    (resolve, is_resolve_tool_enabled(env)),
                                    (entity_history_instructions(env),
-                                    is_entity_history_enabled(env)))
-             if on]
+                                    is_entity_history_enabled(env)),
+                                   (team_activity_instructions(env),
+                                    is_team_activity_enabled(env)))
+             if on and text]
     return "\n\n".join(parts)
 
 
