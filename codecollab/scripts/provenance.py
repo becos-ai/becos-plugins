@@ -90,9 +90,10 @@ def entity_history_instructions(env: Mapping[str, str] | None = None) -> str:
 
 # Team activity (team_activity.py -> vonic_team_activity): one paragraph telling the agent where
 # "who did what" questions are answered. Claude Code runs the script (absolute path, since
-# ${CLAUDE_PLUGIN_ROOT} is not set in the agent's own shell); Opencode calls its `codecollab_team`
-# tool and mirrors that text in src/provenance.ts (a test pins the copy). Codex and Cursor get no
-# paragraph until their command/tool ships.
+# ${CLAUDE_PLUGIN_ROOT} is not set in the agent's own shell); Opencode and Cursor call their
+# `codecollab_team` tool (Opencode mirrors the text in src/provenance.ts; a test pins the copy).
+# Codex runs the script too, but its shell lacks the hook env, so the command sources
+# ~/.codex/codecollab.env first — the wrapper its hooks.json and skills use.
 _TEAM_ACTIVITY_HEAD = """\
 ## Team activity
 For questions about what a person or the team did, decided or changed, or who is working on what \
@@ -115,13 +116,26 @@ def _team_activity_cc() -> str:
         + _TEAM_ACTIVITY_TAIL)
 
 
+def _team_activity_cx() -> str:
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "team_activity.py")
+    run = ("bash -lc 'set -a; [ -f \"$HOME/.codex/codecollab.env\" ] && "
+           ". \"$HOME/.codex/codecollab.env\" >/dev/null 2>&1; set +a; "
+           f"exec python3 \"{script}\" -'")
+    return _TEAM_ACTIVITY_HEAD + (
+        f"run `{run}` in the shell, giving the user's question verbatim on stdin (a quoted "
+        "heredoc), never interpolated into the command line (the `codecollab-team` skill does "
+        "this)." + _TEAM_ACTIVITY_TAIL)
+
+
 def team_activity_instructions(env: Mapping[str, str] | None = None) -> str:
     """The team-activity paragraph for this runtime, or ``""`` where it has no entry point yet."""
     source = os.environ if env is None else env
     tag = (source.get("VONIC_CODECOLLAB_CLIENT_TAG") or "cc").strip()
     if tag == "cc":
         return _team_activity_cc()
-    if tag == "oc":
+    if tag == "cx":
+        return _team_activity_cx()
+    if tag in ("oc", "cur"):
         return _TEAM_ACTIVITY_TOOL
     return ""
 
