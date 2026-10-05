@@ -196,6 +196,65 @@ verifier, or pending-state contents.
 """
 
 
+TEAM_TEMPLATE_VERSION = 1
+TEAM_MARKER = f"codecollab-team-skill v{TEAM_TEMPLATE_VERSION}"
+
+
+def _render_team(plugin_root: Path) -> str:
+    """The `codecollab-team` skill: team-activity questions answered by the server's
+    `vonic_team_activity` through the vendored ``team_activity.py``.
+
+    The question goes on stdin through a quoted heredoc (``-``), never into the command line, so
+    quotes or ``$(...)`` in it stay text. Same env-sourcing wrapper as the other skills, so the
+    script finds the becos URL and token-mint command."""
+    script = plugin_root / "deliver" / "team_activity.py"
+    run = ('bash -lc \'set -a; [ -f "$HOME/.codex/codecollab.env" ] && '
+           '. "$HOME/.codex/codecollab.env" >/dev/null 2>&1; set +a; '
+           f'exec python3 "{script}" -\'')
+    return f"""---
+name: codecollab-team
+description: Answer questions about what a person or the team did, decided or changed, or who is working on what (e.g. "what did nikhil do today?", "changes in becos-memforest this week", "who is working on vonic-agent?"), from CodeCollab's captured coding sessions across the team's repositories. Use this instead of git log for team-activity questions.
+---
+<!-- {TEAM_MARKER} -->
+
+# Team activity
+
+Answer the user's team-activity question from CodeCollab's captured coding sessions (facts and
+decisions with their author, repository and time — not git commits).
+
+## How to run it
+
+1. If there is no question, ask what the user wants to know (a person, a repository, a topic, or a
+   time range) and stop.
+2. Run the script with the user's question **verbatim on stdin** — never interpolate it into the
+   command line:
+
+   ```
+   {run} <<'CODECOLLAB_QUESTION'
+   <the question, verbatim>
+   CODECOLLAB_QUESTION
+   ```
+
+3. Answer **only** from its output. The first line states the filters used (people, repositories,
+   time window, topic): repeat that scope in one short line, then summarise the activity, grouped by
+   person or day as the output is, keeping author emails and repositories, and cite ids where a
+   claim rests on one entry. Do not add items from git, files or memory unless the user asks; if you
+   do, label them as coming from git.
+4. If nothing matched, say so and suggest widening the window or naming a person or repository. If
+   it starts with `Error:` or the command fails, report that memory is unavailable (for an
+   authentication error, suggest the `codecollab-login` skill).
+"""
+
+
+def ensure_team_skill(plugin_root: Path) -> None:
+    """Write ~/.codex/skills/codecollab-team/SKILL.md if missing or its content differs from the
+    current rendering. Fail-open."""
+    try:
+        _write_if_changed(_skills_root() / "codecollab-team" / "SKILL.md", _render_team(plugin_root))
+    except Exception:  # noqa: BLE001 — never block a capture hook
+        pass
+
+
 def ensure_login_skill(plugin_root: Path) -> None:
     """Write ~/.codex/skills/codecollab-login/SKILL.md if missing or its content differs from the
     current rendering (e.g. the plugin root moved to a new cache version). Fail-open."""

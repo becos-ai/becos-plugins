@@ -203,12 +203,13 @@ def _sweep() -> None:
 
 
 def _ensure_backfill_skill() -> None:
-    """SessionStart: make sure the `/backfill` and `/login` skills are installed (idempotent,
+    """SessionStart: make sure the backfill, login and team skills are installed (idempotent,
     fail-open)."""
     try:
-        from skill_install import ensure_backfill_skill, ensure_login_skill
+        from skill_install import ensure_backfill_skill, ensure_login_skill, ensure_team_skill
         ensure_backfill_skill(HERE.parent)
         ensure_login_skill(HERE.parent)
+        ensure_team_skill(HERE.parent)
     except Exception as exc:  # noqa: BLE001 — never block Codex
         _debug(f"skill install skipped: {exc}")
 
