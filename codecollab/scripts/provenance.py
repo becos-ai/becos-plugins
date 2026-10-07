@@ -146,6 +146,41 @@ def is_team_activity_enabled(env: Mapping[str, str] | None = None) -> bool:
     return (source.get("VONIC_CODECOLLAB_TEAM_ACTIVITY") or "1").strip() != "0"
 
 
+# Working agreement: general engineering rules for the agent, unrelated to recall. OFF by default
+# (``VONIC_CODECOLLAB_WORKING_AGREEMENT=1`` turns it on) so its effect can be tested before it is
+# rolled out. Same text on every runtime, first in the session text because it frames the rest.
+# Compact mode only: legacy is the frozen 0.27.3 revert path. Opencode mirrors it in
+# src/provenance.ts (a test pins the copy); test_provenance.py pins it by SHA-256.
+WORKING_AGREEMENT_INSTRUCTIONS = """\
+## Working agreement
+
+These rules apply to all work in this workspace.
+
+1. **Build production-grade software.** Prefer secure, maintainable, deployable solutions over demos, shortcuts, or temporary hacks. Explicitly flag anything left incomplete.
+
+2. **Keep the project working.** Before finishing a non-trivial change, run the relevant tests/checks. Fix failures caused by your change. Add or update tests when behavior changes.
+
+3. **Keep documentation current.** When code changes behavior, configuration, architecture, APIs, deployment, or developer workflows, update the relevant documentation in the same change.
+
+4. **Record important decisions.** Preserve non-obvious architectural decisions, trade-offs, discoveries, limitations, and unresolved work in the project's decision log or equivalent documentation. Do not use it as a changelog.
+
+5. **Verify before asserting.** Check the code, configuration, tests, or authoritative documentation before making claims about how something works. Clearly distinguish verified facts from assumptions or inference.
+
+6. **Do not make silent assumptions.** For substantial work, briefly state your understanding of the task. If missing information materially affects the implementation, ask or explicitly state the assumption being made.
+
+7. **Respect existing architecture.** Understand existing patterns and invariants before changing them. Do not introduce a new pattern, dependency, abstraction, or architectural direction without a clear reason.
+
+8. **Do not destructively modify data or files without flagging it.** Avoid unexpected deletion, overwriting, irreversible migrations, or destructive commands. Prefer reversible changes where practical.
+
+**Definition of done:** implementation, tests, documentation, and relevant decision records are updated together; no known failure or unfinished production concern is left implicit."""
+
+
+def is_working_agreement_enabled(env: Mapping[str, str] | None = None) -> bool:
+    """``VONIC_CODECOLLAB_WORKING_AGREEMENT=1`` (off by default; any other value is off)."""
+    source = os.environ if env is None else env
+    return (source.get("VONIC_CODECOLLAB_WORKING_AGREEMENT") or "").strip() == "1"
+
+
 _MODES = frozenset({"compact", "legacy"})
 
 
@@ -166,12 +201,15 @@ def instruction_texts(env: Mapping[str, str] | None = None) -> tuple[str, str, s
 
 
 def session_instructions(env: Mapping[str, str] | None = None) -> str:
-    """The text ``instructions.py session-start`` injects: the enabled compact sections, or nothing
-    in legacy mode (legacy delivers on every prompt from ``recall.py`` instead)."""
+    """The text ``instructions.py session-start`` injects: the enabled compact sections (the
+    working agreement first, when on), or nothing in legacy mode (legacy delivers on every prompt
+    from ``recall.py`` instead)."""
     if instructions_mode(env) == "legacy":
         return ""
     prov, feedback, resolve = instruction_texts(env)
-    parts = [text for text, on in ((prov, is_provenance_enabled(env)),
+    parts = [text for text, on in ((WORKING_AGREEMENT_INSTRUCTIONS,
+                                    is_working_agreement_enabled(env)),
+                                   (prov, is_provenance_enabled(env)),
                                    (feedback, is_recall_feedback_enabled(env)),
                                    (resolve, is_resolve_tool_enabled(env)),
                                    (entity_history_instructions(env),
