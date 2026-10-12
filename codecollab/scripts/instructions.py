@@ -6,7 +6,9 @@
 stdin is the hook's JSON input; stdout is ``SessionStart`` ``additionalContext`` or nothing. The
 texts (repository provenance, recall feedback, resolve guidance) are ``provenance.session_
 instructions()``: the compact set by default, nothing in ``VONIC_CODECOLLAB_INSTRUCTIONS=legacy``
-mode, which delivers the old texts on every prompt from ``recall.py`` instead.
+mode, which delivers the old texts on every prompt from ``recall.py`` instead. With
+``VONIC_CODECOLLAB_RULEBOOK=1`` the user's accepted rules (``rulebook.py``, cached) follow, in both
+modes, and a detached child refreshes that cache.
 
 Sources:
   startup, clear   a fresh context: inject.
@@ -30,6 +32,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import capture  # noqa: E402
 import provenance  # noqa: E402
+import rulebook  # noqa: E402
 
 _SOURCES = frozenset({"startup", "clear", "compact"})
 
@@ -40,7 +43,18 @@ def session_start(event: dict) -> str | None:
         return None
     if event.get("source") not in _SOURCES:
         return None
-    return provenance.session_instructions() or None
+    text = provenance.session_instructions() or ""
+    if rulebook.enabled():
+        # The user's accepted rules from the local cache (local only — this hook must stay fast),
+        # then a detached refresh for next time. No cache yet: the first prompt injects the fresh
+        # section once (recall.py). Delivered in both instruction modes.
+        cwd = event.get("cwd") or os.getcwd()
+        section = rulebook.session_section(cwd)
+        rulebook.spawn_refresh(cwd, event.get("session_id"),
+                               pending=not section and event.get("source") != "compact")
+        if section:
+            text = f"{text}\n\n{section}" if text else section
+    return text or None
 
 
 def main(argv: list[str] | None = None) -> int:
