@@ -59,6 +59,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import capture  # noqa: E402 — reuse becos config + identity resolution
 import gbrain_client  # noqa: E402
 import provenance  # noqa: E402 — repo-provenance citation grammar
+import rulebook  # noqa: E402 — accepted repository rules (first-prompt delivery)
 
 _DEFAULT_MAXCHARS = 12000
 _HARD_MAXCHARS = 20000
@@ -585,6 +586,16 @@ def main() -> int:
             parts.append(provenance.entity_history_instructions())
     elif provenance.session_reminder():
         parts.append(provenance.session_reminder())
+    # Rulebook: when the session started without a cached rulebook, the background refresh's fresh
+    # section is injected once, on the first prompt after it lands (instructions.py marked it).
+    if rulebook.enabled() and provenance.hook_injects_instructions():
+        try:
+            pending = rulebook.claim_pending(payload.get("session_id"),
+                                             payload.get("cwd") or os.getcwd())
+        except Exception:  # noqa: BLE001 — never block a prompt on the rulebook
+            pending = ""
+        if pending:
+            parts.append(pending)
 
     def _flush() -> int:
         if parts:

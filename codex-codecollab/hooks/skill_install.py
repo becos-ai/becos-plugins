@@ -255,6 +255,68 @@ def ensure_team_skill(plugin_root: Path) -> None:
         pass
 
 
+RULEBOOK_TEMPLATE_VERSION = 1
+RULEBOOK_MARKER = f"codecollab-rulebook-skill v{RULEBOOK_TEMPLATE_VERSION}"
+
+
+def _render_rulebook(plugin_root: Path) -> str:
+    """The `codecollab-rulebook` skill: the user's learned repository rules (server tool
+    `vonic_rulebook`) through the vendored ``rulebook.py``. Choices go on stdin as JSON through a
+    quoted heredoc; same env-sourcing wrapper as the other skills."""
+    script = plugin_root / "deliver" / "rulebook.py"
+    env = ('set -a; [ -f "$HOME/.codex/codecollab.env" ] && '
+           '. "$HOME/.codex/codecollab.env" >/dev/null 2>&1; set +a; '
+           'export VONIC_CODECOLLAB_CLIENT_TAG=cx; ')
+    list_cmd = f"bash -lc '{env}exec python3 \"{script}\" list'"
+    decide_cmd = f"bash -lc '{env}exec python3 \"{script}\" decide'"
+    return f"""---
+name: codecollab-rulebook
+description: Show the rules the team stated to its coding agents for this repository (guardrails, coding conventions, project decisions, learned by CodeCollab) and accept or reject them for yourself. Use when the user asks for their rulebook or to accept/reject rules.
+---
+<!-- {RULEBOOK_MARKER} -->
+
+# Rulebook
+
+Show the user their CodeCollab rulebook for this repository and record their choices. Each user
+accepts or rejects rules for themselves; accepted rules are given back to the agent in every task.
+Run the commands from the repository checkout.
+
+1. List it:
+
+   ```
+   {list_cmd}
+   ```
+
+   For "more", append ` --cursor <n>` (inside the quotes) with the cursor the output named.
+2. Show the output to the user: their accepted rules, then the numbered candidates, verbatim (keep
+   the ids, who stated each rule, and the "restated since you rejected it" / "updated" notes). If
+   the user already said what to accept or reject, go to step 3; otherwise ask them to reply with
+   e.g. "accept all", "reject all" or "accept 1, 3; reject 2", and stop.
+3. Record exactly the user's choices as JSON on stdin (candidate numbers from the latest list, rule
+   ids, or "all"; never a choice the user did not make):
+
+   ```
+   {decide_cmd} <<'CODECOLLAB_RULEBOOK'
+   {{"accept": ["1", "3"], "reject": ["2"]}}
+   CODECOLLAB_RULEBOOK
+   ```
+
+4. Report what was recorded. The output ends with the user's "## Rulebook" section: those rules
+   apply from now on in this task and in their next tasks. Choices are personal; they never change
+   what teammates see. If a command fails, say the rulebook is unavailable (for an authentication
+   error, suggest the `codecollab-login` skill).
+"""
+
+
+def ensure_rulebook_skill(plugin_root: Path) -> None:
+    """Write ~/.codex/skills/codecollab-rulebook/SKILL.md if missing or stale. Fail-open."""
+    try:
+        _write_if_changed(_skills_root() / "codecollab-rulebook" / "SKILL.md",
+                          _render_rulebook(plugin_root))
+    except Exception:  # noqa: BLE001 — never block a capture hook
+        pass
+
+
 def ensure_login_skill(plugin_root: Path) -> None:
     """Write ~/.codex/skills/codecollab-login/SKILL.md if missing or its content differs from the
     current rendering (e.g. the plugin root moved to a new cache version). Fail-open."""
