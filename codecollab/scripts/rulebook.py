@@ -74,9 +74,17 @@ def _timeout() -> float:
 # --- repository + instruction files ----------------------------------------------------------------
 
 
-def repo_context(cwd: str | None) -> tuple[str, str] | None:
-    """``(org/repo slug, checkout root)`` for ``cwd``, or None outside a git checkout."""
+def repo_context(cwd: str | None, session_id: object = None) -> tuple[str, str] | None:
+    """``(org/repo slug, checkout root)`` for ``cwd``, or None outside a git checkout. With
+    projects on: ``(project key, checkout root or "")`` for the session's project."""
     cwd = cwd or os.getcwd()
+    if capture._projects_on():
+        resolved = capture._project(lambda mod: mod.resolve(cwd, session_id))
+        if resolved is None:
+            return None
+        root = (capture._git(cwd, "rev-parse", "--show-toplevel") or ""
+                if resolved.type == "git-repo" and resolved.source == "git" else "")
+        return resolved.key, root
     root = capture._git(cwd, "rev-parse", "--show-toplevel")
     if not root:
         return None
@@ -260,7 +268,7 @@ def list_rules(cwd: str | None, *, cursor: str | None = None) -> tuple[str, dict
         raise ValueError("not inside a git repository")
     slug, root = ctx
     args: dict = {"action": "list", "repository": slug,
-                  "instruction_files": instruction_files(root)}
+                  "instruction_files": instruction_files(root) if root else []}
     if cursor:
         args["cursor"] = cursor
     data = call(args)
