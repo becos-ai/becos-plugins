@@ -446,7 +446,23 @@ def _author_name(cwd: str) -> str | None:
     return None
 
 
-def _git_identity(cwd: str) -> dict:
+def _projects_on() -> bool:
+    """``VONIC_CODECOLLAB_PROJECTS=1``: sessions are filed under a project (``project.py``)."""
+    return (os.environ.get("VONIC_CODECOLLAB_PROJECTS") or "").strip() == "1"
+
+
+def _project(fn, default=None):
+    """Run a ``project`` call, swallowing everything (lazy import: ``project`` imports ``capture``,
+    and a vendored copy shipped without the file still runs)."""
+    try:
+        import project  # noqa: PLC0415 — deliberate: lazy, optional, no import cycle
+        return fn(project)
+    except Exception as exc:  # noqa: BLE001 — scope resolution must never break capture
+        _debug(f"project: {type(exc).__name__}: {exc}")
+        return default
+
+
+def _git_identity(cwd: str, session_id: str | None = None) -> dict:
     """The repository scope a ``vonic_remember`` fact needs: ``{repo, branch, author, commit}``.
 
     Captured per turn at record time rather than read at delivery time. Delivery can happen minutes
@@ -455,8 +471,12 @@ def _git_identity(cwd: str) -> dict:
     ``(tenant, event_id)`` once and treats the same id carrying different content as a hard
     conflict, so drifting metadata would turn a retry into a permanent failure.
 
-    ``{}`` when ``cwd`` is not a work tree — see `_identity_scoped`.
+    ``{}`` when ``cwd`` is not a work tree — see `_identity_scoped`. With projects on, the
+    session's project instead (``project.identity``): a git repo with a remote as before, else the
+    chosen project; ``{}`` only while the session has none yet.
     """
+    if _projects_on():
+        return _project(lambda mod: mod.identity(cwd, session_id), {}) or {}
     if not _is_git(cwd):
         return {}
     return {
@@ -2395,7 +2415,14 @@ def _build_events(buf: dict) -> list[dict]:
     session_id = buf.get("session_id", "")
     turns = buf.get("turns", [])
     # Turns recorded before 0.18.0 carry no identity snapshot; the live work tree is their fallback.
-    live = _git_identity(buf.get("cwd", ""))
+    live = _git_identity(buf.get("cwd", ""), session_id)
+    projects = _projects_on()
+    if (projects and not _identity_scoped(live)
+            and not any(_identity_scoped(t.get("git") or {}) for t in turns)):
+        # No project chosen yet: keep the turns; they ship once the session has one (chosen, or
+        # auto-named after the second turn — see `_maybe_auto_project`).
+        _debug("no project yet — keeping the session's turns for later delivery")
+        return []
     if not _identity_scoped(live) and not any(_identity_scoped(t.get("git") or {}) for t in turns):
         dropped = sum(1 for t in turns if not t.get("uploaded"))
         _debug(f"no repository scope ({live!r}) — dropping {dropped} unscoped turn(s)")
@@ -2417,6 +2444,10 @@ def _build_events(buf: dict) -> list[dict]:
         # dropped below rather than mis-filed under the session's dominant repo (which would fold,
         # e.g., a deleted side-directory's turns into the wrong repository's memory).
         git = t["git"] if "git" in t else live
+        if projects and not _identity_scoped(git):
+            if not _identity_scoped(live):
+                continue              # still no project: keep the turn for a later delivery
+            git = live                # recorded before the project was chosen
         if not _identity_scoped(git):
             t["uploaded"] = True
             _log_delivery(session_id, seq, "turn", "", "dropped: no repository scope")
@@ -2855,6 +2886,32 @@ def _emit_repo_report(text: str | None) -> None:
         print(json.dumps({"systemMessage": text}))
 
 
+_AUTO_PROJECT_AFTER_TURNS = 2
+
+
+def _maybe_auto_project(cwd: str, session_id: str, *, final: bool = False,
+                        turns: int | None = None) -> str | None:
+    """With projects on, name a project for a session that still has none once the user had a
+    chance to answer (from the second recorded turn, or at session end), and return the notice.
+    The first turn is where the agent asks; a numbered-text answer only arrives in the second.
+    ``turns``: the session's turn count when the caller holds it (else read from the buffer)."""
+    if not (_projects_on() and session_id):
+        return None
+    if _project(lambda mod: mod.resolve(cwd, session_id)) is not None:
+        return None
+    if turns is None:
+        turns = len((_load_buffer(_buffer_path(session_id)) or {}).get("turns") or [])
+    if not final and turns < _AUTO_PROJECT_AFTER_TURNS:
+        return None
+    resolved = _project(lambda mod: mod.auto(cwd, session_id))
+    if resolved is None:
+        return None
+    where = f" (saved in {resolved.dot_path})" if resolved.dot_path else ""
+    command = _project(lambda mod: mod.command_name(), "/codecollab-project")
+    return (f"CodeCollab: no project was chosen, so this conversation is saved to a new project "
+            f"{resolved.name}{where}. To use a different one, ask the agent or run {command}.")
+
+
 def _record_turns(event: dict, done: bool, repos: dict | None = None) -> str | None:
     session_id = event.get("session_id", "")
     cwd = event.get("cwd") or os.getcwd()
@@ -2865,7 +2922,7 @@ def _record_turns(event: dict, done: bool, repos: dict | None = None) -> str | N
     # turn — a mixed session has a handful of directories, not hundreds. A turn with no recorded
     # cwd (older transcripts, or a line that carried none) falls back to the event cwd, so live
     # capture and single-directory sessions are unchanged.
-    ident_by_cwd = {c: _git_identity(c) for c in {t.get("cwd") or cwd for t in turns}}
+    ident_by_cwd = {c: _git_identity(c, session_id) for c in {t.get("cwd") or cwd for t in turns}}
     remote_by_cwd = {c: _origin_slug(c) for c in ident_by_cwd}
     # CMEM-support evidence: reduce each turn's tool_events + file_ops to repo-relative refs
     # BEFORE the lock, grouped by the directory the turn ran in so a mixed session resolves each
@@ -2969,7 +3026,7 @@ def _record_session(session: dict, done: bool) -> str | None:
     tag = session.get("client_tag") or os.environ.get("VONIC_CODECOLLAB_CLIENT_TAG", "cc")
     incoming = session.get("turns", []) or []
     path = _buffer_path(session_id)
-    git = _git_identity(cwd)
+    git = _git_identity(cwd, session_id)
     # VONIC_CAPTURE_FILES=0 has to mean the same thing on every adapter. The Claude parser drops
     # path evidence at parse time; a pre-normalized session arrives with it already collected, so
     # strip it here — keeping the tool skeleton, exactly as the Claude path does. A kill switch
@@ -3105,7 +3162,15 @@ def main() -> int:
         except (json.JSONDecodeError, ValueError) as exc:
             _debug(f"bad deliver-session input: {exc}")
             return 0
+        if isinstance(session, dict) and session.get("client_tag"):
+            # The adapter's tag also names project.py's per-session store (process-local).
+            os.environ.setdefault("VONIC_CODECOLLAB_CLIENT_TAG", str(session["client_tag"]))
         path = _record_session(session, done=(event_kind == "finalize"))
+        if isinstance(session, dict):
+            # The adapter shows its own notice; the project is named here either way.
+            _maybe_auto_project(session.get("cwd") or os.getcwd(),
+                                str(session.get("session_id") or ""),
+                                final=(event_kind == "finalize"))
         if path:
             _dispatch(path)
         return 0
@@ -3128,10 +3193,13 @@ def main() -> int:
         # process. Only `turn` collects: `finalize` has no turn of its own and no marker to read.
         activity = _repo_activity(lambda mod: mod.collect(event)) if mode == "turn" else None
         path = _record_turns(event, done=(mode == "finalize"), repos=activity)
+        notice = _maybe_auto_project(event.get("cwd") or os.getcwd(), event.get("session_id", ""),
+                                     final=(mode == "finalize"))
         if path:
             _dispatch(path)
         if mode == "turn":
-            _emit_repo_report(_repo_activity(lambda mod: mod.render(activity)))
+            report = _repo_activity(lambda mod: mod.render(activity))
+            _emit_repo_report("\n\n".join(t for t in (notice, report) if t) or None)
             _log_repo_activity(event.get("session_id", ""), activity)
         return 0
 

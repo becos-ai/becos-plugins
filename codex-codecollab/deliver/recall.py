@@ -409,13 +409,25 @@ def _query_scope(
     that resolves to no repo returns None — and the caller then skips recall entirely, since an
     unscoped query would route to the general brain (which codecollab must never read).
     """
-    if _SCOPE == "off" or not capture._is_git(cwd):
+    if _SCOPE == "off":
         return None
     event = {}
-    repo = capture._repo_slug(cwd)
-    if repo:
-        event["repo_name"] = repo
-    if _SCOPE != "repo":
+    if capture._projects_on():
+        # The session's project (project.py): a git repo with a remote, else the chosen project;
+        # no project yet = no recall, as outside git before.
+        resolved = capture._project(lambda mod: mod.resolve(cwd, session_id))
+        if resolved is None:
+            return None
+        event["repo_name"] = resolved.key
+        in_git = capture._is_git(cwd)
+    else:
+        if not capture._is_git(cwd):
+            return None
+        repo = capture._repo_slug(cwd)
+        if repo:
+            event["repo_name"] = repo
+        in_git = True
+    if _SCOPE != "repo" and in_git:
         branch = capture._branch_or_none(cwd)
         if branch:
             event["branch_name"] = branch

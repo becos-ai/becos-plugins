@@ -197,18 +197,33 @@ def _turn_activity(payload: dict, state: dict,
     return paths, _repo_activity(paths, state.get("cwd", cwd)), ops
 
 
+def _auto_project_notice(cwd: str, session_id: str, turns: int, *, final: bool) -> str | None:
+    """With projects on: name a project for a session that still has none after its second turn
+    (or at its end) BEFORE delivery, so this hook can tell the user (delivery is detached)."""
+    if os.environ.get("VONIC_CODECOLLAB_PROJECTS", "").strip() != "1" or not session_id:
+        return None
+    try:
+        sys.path.insert(0, str(DELIVER.parent))
+        import capture  # noqa: PLC0415 — the vendored core; only needed with projects on
+        return capture._maybe_auto_project(cwd, session_id, final=final, turns=turns)
+    except Exception as exc:  # noqa: BLE001 — never block Codex
+        _debug(f"project auto-name skipped: {exc}")
+        return None
+
+
 def _sweep() -> None:
     """SessionStart: let the vendored core retry any undelivered buffers (detached)."""
     _spawn_detached([sys.executable, str(DELIVER), "sweep"])
 
 
 def _ensure_backfill_skill() -> None:
-    """SessionStart: make sure the backfill, login, team and rulebook skills are installed
-    (idempotent, fail-open)."""
+    """SessionStart: make sure the backfill, login, team and rulebook skills (and, with projects
+    on, the project skill) are installed (idempotent, fail-open)."""
     try:
         from skill_install import (
             ensure_backfill_skill,
             ensure_login_skill,
+            ensure_project_skill,
             ensure_rulebook_skill,
             ensure_team_skill,
         )
@@ -216,6 +231,8 @@ def _ensure_backfill_skill() -> None:
         ensure_login_skill(HERE.parent)
         ensure_team_skill(HERE.parent)
         ensure_rulebook_skill(HERE.parent)
+        if os.environ.get("VONIC_CODECOLLAB_PROJECTS", "").strip() == "1":
+            ensure_project_skill(HERE.parent)
     except Exception as exc:  # noqa: BLE001 — never block Codex
         _debug(f"skill install skipped: {exc}")
 
@@ -274,6 +291,10 @@ def main() -> int:
             state["turns"] = turns
             _save_pending(session_id, state)
         if turns:
+            notice = _auto_project_notice(state.get("cwd", cwd), session_id, len(turns),
+                                          final=(event == "SessionEnd"))
+            if notice and event == "Stop":
+                print(json.dumps({"systemMessage": notice}))
             session = {"session_id": session_id, "cwd": state.get("cwd", cwd),
                        "client_tag": CLIENT_TAG, "turns": turns}
             _deliver_session(session, "finalize" if event == "SessionEnd" else "turn")

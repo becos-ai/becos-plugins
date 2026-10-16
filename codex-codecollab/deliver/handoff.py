@@ -90,9 +90,17 @@ def fetch(request: dict) -> str:
     if not isinstance(session_id, str) or not session_id:
         return "handoff unavailable: no active session id."
 
-    repo = capture._origin_slug(cwd)
-    if not repo or repo.count("/") != 1 or any(not part.strip() for part in repo.split("/")):
-        return "handoff unavailable: git origin has no org/repo slug."
+    if capture._projects_on():
+        # The session's project (git repo with a remote, or the chosen project) — none yet means
+        # nothing to hand off; a later session in this folder resolves it.
+        resolved = capture._project(lambda mod: mod.resolve(cwd, session_id))
+        repo = resolved.key if resolved is not None else None
+        if not repo:
+            return "handoff unavailable: git origin has no org/repo slug."
+    else:
+        repo = capture._origin_slug(cwd)
+        if not repo or repo.count("/") != 1 or any(not part.strip() for part in repo.split("/")):
+            return "handoff unavailable: git origin has no org/repo slug."
 
     arguments = {"repo_name": repo, "exclude_session_id": session_id}
     branch = capture._branch_or_none(cwd)

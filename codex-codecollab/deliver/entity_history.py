@@ -314,6 +314,8 @@ def deliver(mode: str, raw_paths, cwd: str, session_id: str | None, *,
     not-yet-shown files one call looks up (the rest stay unshown for a later call)."""
     if not enabled() or not session_id or not cwd:
         return ""
+    if capture._projects_on() and not capture._project(lambda mod: mod.git_project(cwd)):
+        return ""      # file history needs repo-relative paths: git repos with a remote only
     paths = normalize_paths(raw_paths, cwd)
     if mode == "edit":
         root = _toplevel(cwd) or cwd

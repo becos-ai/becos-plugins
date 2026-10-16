@@ -317,6 +317,61 @@ def ensure_rulebook_skill(plugin_root: Path) -> None:
         pass
 
 
+PROJECT_TEMPLATE_VERSION = 1
+PROJECT_MARKER = f"codecollab-project-skill v{PROJECT_TEMPLATE_VERSION}"
+
+
+def _render_project(plugin_root: Path) -> str:
+    """The `codecollab-project` skill: which CodeCollab project this conversation is saved to
+    (server tool `vonic_projects`) through the vendored ``project.py``; same env wrapper."""
+    script = plugin_root / "deliver" / "project.py"
+    env = ('set -a; [ -f "$HOME/.codex/codecollab.env" ] && '
+           '. "$HOME/.codex/codecollab.env" >/dev/null 2>&1; set +a; '
+           'export VONIC_CODECOLLAB_CLIENT_TAG=cx; ')
+    base = f"exec python3 \"{script}\" --cwd \"<cwd>\" --session \"<session id>\""
+    return f"""---
+name: codecollab-project
+description: Show or change which CodeCollab project this conversation is saved to (folders outside git repos). Use when the user asks which project this is, or to use or create another project.
+---
+<!-- {PROJECT_MARKER} -->
+
+# CodeCollab project
+
+A git repo's project is the repo itself and can't be changed. In other folders the project comes
+from the user's `.becos-project` file; a change applies to this task only (the project is added to
+the user's list in that file for next time). Use the `--cwd` and `--session` values from the
+"CodeCollab project" lines in your context.
+
+1. List the choices:
+
+   ```
+   bash -lc '{env}{base} list'
+   ```
+
+2. Show the user the current project and the list (numbered). If the user already named a project
+   or asked for a new one, go to step 3; otherwise ask which one to use, and stop.
+3. Record exactly the user's choice (`use <name>`, or `use --new [<name>]` for a new project; a
+   new name is lowercase letters, digits and dashes, and no name means a generated one):
+
+   ```
+   bash -lc '{env}{base} use "<name>"'
+   bash -lc '{env}{base} use --new'
+   ```
+
+   If the name is taken, the error suggests a free one: offer it to the user.
+4. Report the result in one line. Turns already saved stay where they were saved.
+"""
+
+
+def ensure_project_skill(plugin_root: Path) -> None:
+    """Write ~/.codex/skills/codecollab-project/SKILL.md if missing or stale. Fail-open."""
+    try:
+        _write_if_changed(_skills_root() / "codecollab-project" / "SKILL.md",
+                          _render_project(plugin_root))
+    except Exception:  # noqa: BLE001 — never block a capture hook
+        pass
+
+
 def ensure_login_skill(plugin_root: Path) -> None:
     """Write ~/.codex/skills/codecollab-login/SKILL.md if missing or its content differs from the
     current rendering (e.g. the plugin root moved to a new cache version). Fail-open."""
