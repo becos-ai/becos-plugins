@@ -23,11 +23,12 @@ omit `--session` for `list`.
    If that path does not exist, use the installed copy:
    `ls ~/.claude/plugins/cache/*/codecollab/*/scripts/project.py 2>/dev/null | tail -1`.
 
-2. Show the user the current project and the list. If the request above already names a project
-   (or says "new"), go to step 3; otherwise ask which one to use (your question tool if you have
-   one: a few likely projects plus "New project: <suggested name>"), and wait for the answer.
+2. If the request is empty, respond with the complete output of the `list` command as normal text.
+   Do not use a question tool or a multiple-choice widget. Tell the user to select a project with
+   `/codecollab:project <project name>`, or create one with `/codecollab:project new [name]`, then
+   stop and wait for their next command.
 
-3. Record exactly the user's choice:
+3. If the request already names a project or starts with `new`, record exactly that choice:
 
    ```bash
    python3 "${CLAUDE_PLUGIN_ROOT}/scripts/project.py" --cwd "<cwd>" --session "<session id>" use "<name>"
