@@ -41,6 +41,10 @@ _RECEIPT_FIELDS = {
 _AUDIT_SECRET_KEYS = frozenset({
     "authorization", "token", "access_token", "client_secret", "password", "api_key",
 })
+_AUDIT_SHARED_SECRET_KEYS = frozenset({
+    "package_text", "rationale", "source_refs", "url", "fields", "download_url",
+})
+_AUDIT_SHARED_TOOLS = frozenset({"vonic_shared_handoffs", "vonic_shared_artifact"})
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -58,14 +62,15 @@ def _audit_log_path() -> str:
     return os.path.join(base, "codecollab", "backend-api.log")
 
 
-def _redact_audit_value(value):
+def _redact_audit_value(value, secret_keys=_AUDIT_SECRET_KEYS):
     if isinstance(value, dict):
         return {
-            key: "***REDACTED***" if key.lower() in _AUDIT_SECRET_KEYS else _redact_audit_value(item)
+            key: "***REDACTED***" if key.lower() in secret_keys
+            else _redact_audit_value(item, secret_keys)
             for key, item in value.items()
         }
     if isinstance(value, list):
-        return [_redact_audit_value(item) for item in value]
+        return [_redact_audit_value(item, secret_keys) for item in value]
     return value
 
 
@@ -73,23 +78,30 @@ def _audit_call(name: str, arguments: dict, *, response=None, error: Exception |
     """Append a complete local request/response audit record when explicitly enabled."""
     if os.environ.get("VONIC_BACKEND_AUDIT_LOG") != "1":
         return
+    secret_keys = (_AUDIT_SECRET_KEYS | _AUDIT_SHARED_SECRET_KEYS
+                   if name in _AUDIT_SHARED_TOOLS else _AUDIT_SECRET_KEYS)
     record = {
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "client_tag": os.environ.get("VONIC_CODECOLLAB_CLIENT_TAG", "cc"),
         "tool": name,
-        "request": _redact_audit_value(arguments),
+        "request": _redact_audit_value(arguments, secret_keys),
     }
     if source := os.environ.get("VONIC_CODECOLLAB_RECALL_SOURCE"):
         record["recall_source"] = source
     if mode := os.environ.get("VONIC_CODECOLLAB_CALLER_MODE"):
         record["caller_mode"] = mode
     if error is None:
-        record["response"] = _redact_audit_value(response)
+        record["response"] = _redact_audit_value(response, secret_keys)
     else:
         record["error"] = {"type": type(error).__name__, "message": str(error)}
     try:
-        os.makedirs(os.path.dirname(_audit_log_path()), exist_ok=True)
-        with open(_audit_log_path(), "a", encoding="utf-8") as handle:
+        directory = os.path.dirname(_audit_log_path())
+        os.makedirs(directory, mode=0o700, exist_ok=True)
+        os.chmod(directory, 0o700)
+        flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(_audit_log_path(), flags, 0o600)
+        os.chmod(_audit_log_path(), 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
     except OSError:
         pass

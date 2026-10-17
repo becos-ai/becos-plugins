@@ -1151,6 +1151,42 @@ def _parse_session(transcript_path: str, default_cwd: str | None = None) -> list
     return turns
 
 
+_MAX_CHANGED_PATHS = 100
+
+
+def turn_changed_paths(transcript_path: str, default_cwd: str | None = None) -> list[str]:
+    """Absolute paths the agent CREATED or MODIFIED in the transcript's last completed turn.
+
+    The one exported reader of the per-turn `file_ops` buckets (the local-path form of
+    `files_created`/`files_modified`, before `repo_activity` reduces them to `{repo, path}` refs).
+    `shared_handoff.py persist-turn` calls this so automatic per-turn persistence reuses this
+    parser instead of carrying a second one; the repo-relative buckets are useless to it, since a
+    project without a git repository resolves no repo at all.
+
+    Reads and deletions are never returned, paths are resolved against the turn's own `cwd`, the
+    list is de-duplicated and bounded, and `VONIC_CAPTURE_FILES=0` empties it like everything else
+    derived from file-path evidence.
+    """
+    turns = _parse_session(transcript_path, default_cwd)
+    if not turns:
+        return []
+    turn = turns[-1]
+    base = turn.get("cwd") or default_cwd or os.getcwd()
+    out: list[str] = []
+    for op in turn.get("file_ops") or []:
+        if not isinstance(op, dict) or op.get("op") not in ("created", "modified"):
+            continue
+        path = op.get("path")
+        if not isinstance(path, str) or not path.strip():
+            continue
+        absolute = os.path.normpath(path if os.path.isabs(path) else os.path.join(base, path))
+        if absolute not in out:
+            out.append(absolute)
+        if len(out) >= _MAX_CHANGED_PATHS:
+            break
+    return out
+
+
 # ── buffer (locked) ──────────────────────────────────────────────────────────
 
 def _buffer_path(session_id: str) -> str:

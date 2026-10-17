@@ -4,14 +4,16 @@
       {
         "hooks": [
           { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/recall.py\"", "timeout": 60 },
-          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/handoff.py\" prompt-submit", "timeout": 5 }
+          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/handoff.py\" prompt-submit", "timeout": 5 },
+          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/shared_handoff.py\" notify", "timeout": 5 }
         ]
       }
     ],
     "Stop": [
       {
         "hooks": [
-          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/capture.py\" turn" }
+          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/capture.py\" turn" },
+          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/shared_handoff.py\" persist-turn-hook", "timeout": 5 }
         ]
       }
     ],
@@ -20,7 +22,8 @@
         "hooks": [
           { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/capture.py\" sweep" },
           { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/handoff.py\" session-start", "timeout": 5 },
-          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/instructions.py\" session-start", "timeout": 5 }
+          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/instructions.py\" session-start", "timeout": 5 },
+          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/shared_handoff.py\" refresh", "timeout": 5 }
         ]
       }
     ],
