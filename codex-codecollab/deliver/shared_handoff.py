@@ -73,7 +73,8 @@ class SharedHandoffError(RuntimeError):
 
 
 def enabled() -> bool:
-    return os.environ.get("VONIC_CODECOLLAB_SHARED_HANDOFFS") == "1"
+    """Default on; explicit values retain the exact-1 feature-flag contract."""
+    return os.environ.get("VONIC_CODECOLLAB_SHARED_HANDOFFS", "1") == "1"
 
 
 def hook_enabled() -> bool:

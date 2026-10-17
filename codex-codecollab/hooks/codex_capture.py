@@ -200,7 +200,7 @@ def _turn_activity(payload: dict, state: dict,
 def _auto_project_notice(cwd: str, session_id: str, turns: int, *, final: bool) -> str | None:
     """With projects on: name a project for a session that still has none after its second turn
     (or at its end) BEFORE delivery, so this hook can tell the user (delivery is detached)."""
-    if os.environ.get("VONIC_CODECOLLAB_PROJECTS", "").strip() != "1" or not session_id:
+    if os.environ.get("VONIC_CODECOLLAB_PROJECTS", "1").strip() != "1" or not session_id:
         return None
     try:
         sys.path.insert(0, str(DELIVER.parent))
@@ -231,7 +231,7 @@ def _ensure_backfill_skill() -> None:
         ensure_login_skill(HERE.parent)
         ensure_team_skill(HERE.parent)
         ensure_rulebook_skill(HERE.parent)
-        if os.environ.get("VONIC_CODECOLLAB_PROJECTS", "").strip() == "1":
+        if os.environ.get("VONIC_CODECOLLAB_PROJECTS", "1").strip() == "1":
             ensure_project_skill(HERE.parent)
     except Exception as exc:  # noqa: BLE001 — never block Codex
         _debug(f"skill install skipped: {exc}")
