@@ -26,7 +26,7 @@ other users' entries are never read for, shown to or changed by this user. A cho
 user has no entry writes one (``default`` = the choice); a later switch is session-only and only
 adds the project to the user's ``projects`` list. Invalid JSON is never overwritten.
 
-Off by default: ``VONIC_CODECOLLAB_PROJECTS=1``. Exit codes: 0 ok, 1 the server call failed, 2 usage
+On by default: ``VONIC_CODECOLLAB_PROJECTS=0`` opts out. Exit codes: 0 ok, 1 the server call failed, 2 usage
 error, git repo (cannot change) or no project yet. Everything that runs from a hook fails open.
 """
 
@@ -62,9 +62,9 @@ _MAX_LISTED = 15
 
 
 def enabled(env: dict | None = None) -> bool:
-    """``VONIC_CODECOLLAB_PROJECTS=1`` (off by default; only exactly ``1`` enables it)."""
+    """Default on; an explicit value must be ``1`` (trimmed) to enable it."""
     source = os.environ if env is None else env
-    return (source.get("VONIC_CODECOLLAB_PROJECTS") or "").strip() == "1"
+    return source.get("VONIC_CODECOLLAB_PROJECTS", "1").strip() == "1"
 
 
 def _timeout() -> float:

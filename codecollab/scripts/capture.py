@@ -448,7 +448,7 @@ def _author_name(cwd: str) -> str | None:
 
 def _projects_on() -> bool:
     """``VONIC_CODECOLLAB_PROJECTS=1``: sessions are filed under a project (``project.py``)."""
-    return (os.environ.get("VONIC_CODECOLLAB_PROJECTS") or "").strip() == "1"
+    return os.environ.get("VONIC_CODECOLLAB_PROJECTS", "1").strip() == "1"
 
 
 def _project(fn, default=None):
