@@ -67,6 +67,34 @@ _SENSITIVE_NAMES = {".env", ".git", ".ssh", ".aws", ".gnupg", "credentials", "se
 _SENSITIVE_SUFFIXES = {".key", ".pem", ".p12", ".pfx", ".jks", ".keystore"}
 _OPAQUE_EXTENSIONS = {".gif", ".jpeg", ".jpg", ".pdf", ".png", ".svg", ".webp"}
 
+# How each runtime's user/model reaches the inbox, keyed by VONIC_CODECOLLAB_CLIENT_TAG. The
+# notice and the accepted-context hint name what THIS runtime can actually invoke; the server's
+# own tool name (``vonic_shared_handoffs``) is never directly callable by a client's model.
+_INBOX_SURFACE = {
+    "cc": "/codecollab:shared",
+    "oc": "/codecollab-shared",
+    "cx": "the codecollab-shared skill",
+    "cur": "/codecollab-shared",
+}
+_GET_SURFACE = {
+    "cc": "/codecollab:shared get {id}",
+    "oc": "codecollab_shared(action='get', handoff_id='{id}')",
+    "cx": "the codecollab-shared skill (get {id})",
+    "cur": "codecollab_shared(action='get', handoff_id='{id}')",
+}
+_SERVER_GET_RE = re.compile(r"vonic_shared_handoffs\(action='get', handoff_id='([A-Za-z0-9_-]{1,128})'\)")
+
+
+def inbox_reference() -> str:
+    """The inbox command/skill/tool for this runtime (Claude Code's when the tag is unknown)."""
+    return _INBOX_SURFACE.get(capture._client_tag(), _INBOX_SURFACE["cc"])
+
+
+def get_reference(handoff_id: str) -> str:
+    """How this runtime fetches one package in full."""
+    template = _GET_SURFACE.get(capture._client_tag(), _GET_SURFACE["cc"])
+    return template.format(id=handoff_id)
+
 
 class SharedHandoffError(RuntimeError):
     pass
@@ -281,6 +309,10 @@ def render_package(result: object) -> object:
         rendered["source_event_ids"] = _bounded_ids(rendered.get("source_event_ids"))
     if "evidence" in rendered:
         rendered["evidence"] = _render_evidence(rendered.get("evidence"))
+    if isinstance(rendered.get("context"), str):
+        # The accepted context names the server tool; point at this runtime's own surface.
+        rendered["context"] = _SERVER_GET_RE.sub(
+            lambda match: get_reference(match.group(1)), rendered["context"])
     return rendered
 
 
@@ -1039,7 +1071,7 @@ def notification() -> str:
                 "addressed_handle": str(row.get("addressed_handle") or "")[:64],
                 "summary": str(row.get("summary") or "")[:240]}
         lines.append("- " + _safe_line(safe))
-    lines.append("Use /codecollab:shared to inspect or accept them.")
+    lines.append(f"Use {inbox_reference()} to inspect or accept them.")
     lines.append("</shared-handoff-notice>")
     return "\n".join(lines)
 
