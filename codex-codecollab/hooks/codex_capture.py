@@ -20,10 +20,12 @@ Why we build turns from the hook payload (not the transcript):
   and repo slugs only, never file contents/diffs).
 
 Events -> action:
-  SessionStart      -> sweep  (retry any buffers a prior session left undelivered)
+  SessionStart      -> sweep  (retry any buffers a prior session left undelivered); install the
+                       skills; refresh the shared-handoff inbox (detached)
   UserPromptSubmit  -> stash the prompt as this session's pending user turn (recall is a *separate*
                        hook: deliver/recall.py, wired in hooks.json)
-  Stop              -> complete the turn with last_assistant_message; deliver the whole session
+  Stop              -> complete the turn with last_assistant_message; deliver the whole session;
+                       hand the turn's written files to the core's nocode persistence (detached)
   SessionEnd        -> deliver + finalize (mark the session done)
 
 Fail-open: any error exits 0 so Codex is never blocked. Set VONIC_CODECOLLAB_DEBUG=1 to log.
@@ -216,15 +218,45 @@ def _sweep() -> None:
     _spawn_detached([sys.executable, str(DELIVER), "sweep"])
 
 
+SHARED = DELIVER.parent / "shared_handoff.py"
+
+
+def _shared_handoffs_on() -> bool:
+    """The shared-handoff flag, as the vendored core reads it: default on, explicit exact ``1``."""
+    return os.environ.get("VONIC_CODECOLLAB_SHARED_HANDOFFS", "1") == "1"
+
+
+def _refresh_inbox() -> None:
+    """SessionStart: refresh the team-handoff inbox in the background (detached; the core does its
+    own host/flag checks and fails open), so the next prompt can carry a new-handoff notice."""
+    if _shared_handoffs_on():
+        _spawn_detached([sys.executable, str(SHARED), "refresh"])
+
+
+def _persist_turn(session_id: str, cwd: str, file_ops: list[dict]) -> None:
+    """Stop: hand this turn's created/modified files to the core's ``persist-turn`` (detached).
+
+    The core decides everything else — projects without a git repository only, the opt-out flag,
+    workspace confinement, screening and the size budget; a git-repo session persists nothing.
+    Only two cheap checks here: the flag, and that the turn wrote at least one file."""
+    paths = [op["path"] for op in file_ops if op.get("op") in ("created", "modified")]
+    if not paths or not _shared_handoffs_on():
+        return
+    _spawn_detached([sys.executable, str(SHARED), "persist-turn"],
+                    stdin_text=json.dumps({"cwd": cwd, "session_id": session_id, "paths": paths}))
+
+
 def _ensure_backfill_skill() -> None:
     """SessionStart: make sure the backfill, login, team and rulebook skills (and, with projects
-    on, the project skill) are installed (idempotent, fail-open)."""
+    on, the project skill; with shared handoffs on, the share/shared skills, removed when off) are
+    installed (idempotent, fail-open)."""
     try:
         from skill_install import (
             ensure_backfill_skill,
             ensure_login_skill,
             ensure_project_skill,
             ensure_rulebook_skill,
+            ensure_shared_handoff_skills,
             ensure_team_skill,
         )
         ensure_backfill_skill(HERE.parent)
@@ -233,6 +265,7 @@ def _ensure_backfill_skill() -> None:
         ensure_rulebook_skill(HERE.parent)
         if os.environ.get("VONIC_CODECOLLAB_PROJECTS", "1").strip() == "1":
             ensure_project_skill(HERE.parent)
+        ensure_shared_handoff_skills(HERE.parent, _shared_handoffs_on())
     except Exception as exc:  # noqa: BLE001 — never block Codex
         _debug(f"skill install skipped: {exc}")
 
@@ -253,6 +286,7 @@ def main() -> int:
     if event == "SessionStart":
         _sweep()
         _ensure_backfill_skill()   # one-step install of the /backfill skill (idempotent, fail-open)
+        _refresh_inbox()
         return 0
 
     if event == "UserPromptSubmit":
@@ -274,6 +308,7 @@ def main() -> int:
             files, repos, file_ops = _turn_activity(payload, state, cwd)
             turn = {"seq": len(turns), "ts": _iso_now(),
                     "user": user, "assistant": assistant, "files": files}
+            _persist_turn(session_id, state.get("cwd", cwd), file_ops)
             if file_ops:
                 # The vendored core builds `changed_files` from `file_ops` (resolved to repo-relative
                 # paths locally); the absolute `files` list alone no longer reaches the wire.
