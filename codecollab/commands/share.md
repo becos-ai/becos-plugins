@@ -12,7 +12,13 @@ explicit sharing intent. The request is: `$ARGUMENTS`
 2. Build a concise package from explicit conversation content only: objective, summary, rationale,
    decisions and tradeoffs, rejected approaches, current state, open questions, and next steps. Do
    not include hidden reasoning. Select at most 10 useful workspace files, 25 MiB total. Never infer
-   that all modified files should be sent.
+   that all modified files should be sent. Write for the recipient, who sees the sender's name
+   separately, so never narrate the sender in the third person ("Ada asks you…"):
+   - `objective` is the package's title in every inbox and the dashboard: one line, under about 100
+     characters, naming what the recipient should do ("Set up hello@ and support@ on becos.ai").
+   - `summary` opens with that ask addressed to the recipient ("Please…", "Can you…"), then at most
+     two or three short sentences of context: why it matters and where to start. Keep it under about
+     400 characters; details, numbers and file names belong in `package_text`.
 3. Optionally attach team evidence. `source_event_ids` may contain up to 50 unique citation ids
    (`fact_…`, `decision_…`, event ids, page slugs) that **actually appeared in this session** — in a
    `<recalled-memory>` block, an `<entity-history>` block, or a resolve/`show_source` result. Never
