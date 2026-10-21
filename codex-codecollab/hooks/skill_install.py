@@ -423,6 +423,13 @@ hand off. Run every command from the task's workspace; each takes one JSON objec
    any message in the request. No hidden reasoning. Select at most 10 useful workspace files
    (25 MiB total, workspace-relative paths) only when the request or conversation calls for them;
    never send every modified file.
+   Write for the recipient, who sees the sender's name separately, so never narrate the sender in
+   the third person ("Ada asks you…"):
+   - `objective` is the package's title in every inbox and the dashboard: one line, under about
+     100 characters, naming what the recipient should do ("Set up hello@ and support@ on becos.ai").
+   - `summary` opens with that ask addressed to the recipient ("Please…", "Can you…"), then at
+     most two or three short sentences of context: why it matters and where to start. Keep it under
+     about 400 characters; details, numbers and file names belong in `package_text`.
 3. `source_event_ids` (optional, up to 50) may hold only citation ids that actually appeared in this
    task (a `<recalled-memory>` or `<entity-history>` block, or a resolve result); never invent or
    alter one, and pass `project_key` (this task's CodeCollab project) with them. Omit both when none
