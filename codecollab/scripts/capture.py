@@ -685,6 +685,12 @@ def _fenced_code(text: str) -> list[dict]:
 _READ_TOOLS = {"Read", "NotebookRead"}
 _SEARCH_TOOLS = {"Grep", "Glob"}
 _BASH_TOOLS = {"Bash"}
+# Team activity answers describe OTHER people's work; a turn that ran it is marked so the server
+# does not store the agent's restatement as the asker's own facts (TODOS #18). The tool names are
+# the agent tool (`vonic_team_activity`, any MCP prefix) and OpenCode's `codecollab_team`; the
+# script is how `/codecollab:team` runs it from a shell.
+_TEAM_ACTIVITY_TOOLS = {"vonic_team_activity", "codecollab_team"}
+_TEAM_ACTIVITY_SCRIPT = "team_activity.py"
 # Tools whose input is understood well enough to lift a path from. Anything else (Task/Agent,
 # AskUserQuestion, ToolSearch, every mcp__* tool) is deliberately absent.
 _PATH_TOOLS = _READ_TOOLS | _SEARCH_TOOLS | _EDIT_TOOLS
@@ -1713,6 +1719,22 @@ def _bounded_context(ctx: dict) -> dict:
     return ctx
 
 
+def _used_team_activity(events: object) -> bool:
+    """Whether a turn's raw tool events include a team-activity call: the tool by name (with or
+    without a server prefix: Claude's ``mcp__…__``, Cursor's ``MCP:``) or a shell command running
+    ``team_activity.py``."""
+    for event in events if isinstance(events, list) else []:
+        if not isinstance(event, dict):
+            continue
+        if re.split(r"__|:", str(event.get("tool") or ""))[-1] in _TEAM_ACTIVITY_TOOLS:
+            return True
+        raw = event.get("input")
+        command = raw.get("command") if isinstance(raw, dict) else None
+        if isinstance(command, str) and _TEAM_ACTIVITY_SCRIPT in command:
+            return True
+    return False
+
+
 def _capture_context(resolved: dict | None, git: dict, turn: dict,
                      repo_remote: str | None) -> dict | None:
     """Assemble one turn's ``capture_context`` — deterministic CMEM-support evidence for the free-form
@@ -1779,6 +1801,11 @@ def _capture_context(resolved: dict | None, git: dict, turn: dict,
                 turn_meta[key] = value[:_MAX_PATH]
         if turn_meta:
             ctx["turn"] = turn_meta
+
+    # The raw events, not the resolved ones: only they still carry the shell command. An adapter
+    # that sends no tool events (Codex) marks the turn itself with `team_activity: true`.
+    if turn.get("team_activity") is True or _used_team_activity(turn.get("tool_events")):
+        ctx["team_activity"] = True
 
     if len(ctx) == 1:   # schema_version only — no real evidence to carry
         return None
