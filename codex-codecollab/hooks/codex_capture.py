@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -116,16 +117,15 @@ def _changed_paths(transcript_path: str, offset: int) -> tuple[list[str], int]:
 
 def _changed_ops(transcript_path: str, offset: int) -> tuple[list[dict], int]:
     """File ops (``{"path", "op"}``) this turn WROTE, read from the rollout since `offset`; plus the
-    new offset.
+    new offset (see `_ops_from`)."""
+    records, new_offset = _read_rollout(transcript_path, offset)
+    return _ops_from(records), new_offset
 
-    The ONE signal we take from the rollout. A file edit lands as an ``event_msg`` whose payload is
-    a ``patch_apply_end`` carrying ``changes`` — a map keyed by absolute path. We take its KEYS (the
-    paths) and each change's ``type`` string (add / update / delete); the ``content`` value (the file
-    body / diff) is never read, so the privacy bar is the same as the rest of capture: paths, never
-    contents. Defensive + fail-closed — an unreadable file or an unexpected shape yields no path
-    rather than a wrong or leaky one. A torn final line (a write in flight) is left unconsumed so the
-    next turn re-reads it instead of losing it.
-    """
+
+def _read_rollout(transcript_path: str, offset: int) -> tuple[list[dict], int]:
+    """The rollout's records since `offset`, plus the new offset. Defensive + fail-closed — an
+    unreadable file yields nothing, and a torn final line (a write in flight) is left unconsumed so
+    the next turn re-reads it instead of losing it."""
     if not transcript_path:
         return [], offset
     try:
@@ -139,15 +139,58 @@ def _changed_ops(transcript_path: str, offset: int) -> tuple[list[dict], int]:
     if raw and not raw[-1].endswith(b"\n"):   # partial trailing write — re-read it next time
         new_offset -= len(raw[-1])
         raw = raw[:-1]
-    ops: list[dict] = []
-    seen: set[str] = set()
+    records: list[dict] = []
     for line in raw:
         try:
             rec = json.loads(line.decode("utf-8"))
         except (UnicodeDecodeError, ValueError):
             continue  # a torn or non-UTF8 line — skip, never guess
-        if not isinstance(rec, dict):
+        if isinstance(rec, dict):
+            records.append(rec)
+    return records, new_offset
+
+
+# Team activity answers describe OTHER people's work; a turn that ran it is marked so the server
+# does not store the agent's restatement as the user's own facts (TODOS #18). Codex runs it through
+# the `codecollab-team` skill's shell command, or as an MCP tool where one is configured.
+_TEAM_ACTIVITY_SCRIPT = "team_activity.py"
+_TEAM_ACTIVITY_TOOLS = {"vonic_team_activity", "codecollab_team"}
+# The rollout records that are the agent's own tool calls, across Codex versions: shell and exec
+# calls, the code-mode `exec` tool, and MCP calls. Messages are never inspected, so a reply that
+# merely MENTIONS the script does not mark the turn.
+_CALL_TYPES = {"function_call", "custom_tool_call", "local_shell_call", "exec_command_begin",
+               "mcp_tool_call_begin"}
+
+
+def _ran_team_activity(records: list[dict]) -> bool:
+    """Whether one of this turn's tool calls ran team activity. Only the yes/no leaves the machine;
+    the command text is read here and never sent."""
+    for rec in records:
+        payload = rec.get("payload")
+        if not (isinstance(payload, dict) and payload.get("type") in _CALL_TYPES):
             continue
+        invocation = payload.get("invocation") if isinstance(payload.get("invocation"), dict) else {}
+        name = str(payload.get("name") or invocation.get("tool") or "")
+        if re.split(r"__|:|\.", name)[-1] in _TEAM_ACTIVITY_TOOLS:
+            return True
+        call = [payload.get(key) for key in ("arguments", "input", "action", "command")]
+        if _TEAM_ACTIVITY_SCRIPT in json.dumps(call, ensure_ascii=False, default=str):
+            return True
+    return False
+
+
+def _ops_from(records: list[dict]) -> list[dict]:
+    """The file ops in rollout ``records``.
+
+    A file edit lands as an ``event_msg`` whose payload is a ``patch_apply_end`` carrying
+    ``changes`` — a map keyed by absolute path. We take its KEYS (the paths) and each change's
+    ``type`` string (add / update / delete); the ``content`` value (the file body / diff) is never
+    read, so the privacy bar is the same as the rest of capture: paths, never contents. An unexpected
+    shape yields no path rather than a wrong or leaky one.
+    """
+    ops: list[dict] = []
+    seen: set[str] = set()
+    for rec in records:
         payload = rec.get("payload")
         if not (isinstance(payload, dict) and payload.get("type") == "patch_apply_end"):
             continue
@@ -161,7 +204,7 @@ def _changed_ops(transcript_path: str, offset: int) -> tuple[list[dict], int]:
                 seen.add(path)
                 kind = change.get("type") if isinstance(change, dict) else None
                 ops.append({"path": path, "op": _OP_FOR_KIND.get(kind, "modified")})
-    return ops, new_offset
+    return ops
 
 
 def _repo_activity(paths: list[str], cwd: str) -> dict | None:
@@ -182,21 +225,22 @@ def _repo_activity(paths: list[str], cwd: str) -> dict | None:
 
 
 def _turn_activity(payload: dict, state: dict,
-                   cwd: str) -> tuple[list[str], dict | None, list[dict]]:
-    """The current turn's changed files, repository activity and file ops, advancing the
-    per-session rollout offset stored in ``state``. Codex opens a NEW rollout on resume, so the
-    offset is reset whenever the transcript path moves. Mutates ``state`` (the caller persists it);
-    fail-open."""
+                   cwd: str) -> tuple[list[str], dict | None, list[dict], bool]:
+    """The current turn's changed files, repository activity, file ops and whether it ran team
+    activity, advancing the per-session rollout offset stored in ``state``. Codex opens a NEW
+    rollout on resume, so the offset is reset whenever the transcript path moves. Mutates ``state``
+    (the caller persists it); fail-open."""
     transcript = payload.get("transcript_path") or ""
     if not transcript:
-        return [], None, []
+        return [], None, [], False
     if state.get("rollout_path") != transcript:     # new rollout file — start from its beginning
         state["rollout_path"] = transcript
         state["rollout_offset"] = 0
-    ops, new_offset = _changed_ops(transcript, state.get("rollout_offset", 0))
+    records, new_offset = _read_rollout(transcript, state.get("rollout_offset", 0))
     state["rollout_offset"] = new_offset
+    ops = _ops_from(records)
     paths = [op["path"] for op in ops]
-    return paths, _repo_activity(paths, state.get("cwd", cwd)), ops
+    return paths, _repo_activity(paths, state.get("cwd", cwd)), ops, _ran_team_activity(records)
 
 
 def _auto_project_notice(cwd: str, session_id: str, turns: int, *, final: bool) -> str | None:
@@ -305,9 +349,11 @@ def main() -> int:
         assistant = (payload.get("last_assistant_message") or "").strip()
         user = state.pop("pending_user", "")
         if event == "Stop" and (user or assistant):
-            files, repos, file_ops = _turn_activity(payload, state, cwd)
+            files, repos, file_ops, team_activity = _turn_activity(payload, state, cwd)
             turn = {"seq": len(turns), "ts": _iso_now(),
                     "user": user, "assistant": assistant, "files": files}
+            if team_activity:
+                turn["team_activity"] = True   # the core marks capture_context (TODOS #18)
             _persist_turn(session_id, state.get("cwd", cwd), file_ops)
             if file_ops:
                 # The vendored core builds `changed_files` from `file_ops` (resolved to repo-relative
