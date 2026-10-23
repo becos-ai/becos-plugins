@@ -298,7 +298,7 @@ def _notify_auth_expired() -> None:
         pass
 
 
-def _emit_context(context: str) -> None:
+def _emit_context(context: str, event: str = "UserPromptSubmit", notice: str | None = None) -> None:
     """Emit UserPromptSubmit additionalContext — the one channel that reaches the model.
 
     Recalled memory is wrapped in an explicit `<recalled-memory>` element naming its source and
@@ -319,12 +319,91 @@ def _emit_context(context: str) -> None:
     field in the UserPromptSubmit output schema, and the sole rewrite field (`updatedInput`) is
     PreToolUse-only.
     """
-    print(json.dumps({
-        "hookSpecificOutput": {
-            "hookEventName": "UserPromptSubmit",
-            "additionalContext": context,
-        }
-    }))
+    out: dict = {"hookSpecificOutput": {"hookEventName": event, "additionalContext": context}}
+    if notice:
+        out["systemMessage"] = notice   # shown to the user only; never part of the model's context
+    print(json.dumps(out))
+
+
+# Hook events this script answers. SubagentStart (Claude Code, Codex) gives a dispatched subagent
+# its own request-scoped recall; its output schema is the same `additionalContext` field.
+_HOOK_EVENTS = {"UserPromptSubmit", "SubagentStart"}
+_MEMORY_RE = re.compile(r"<recalled-memory([^>]*)>\n(.*?)\n</recalled-memory>", re.S)
+_ATTR_RE = re.compile(r'(\w+)="([^"]*)"')
+_AUTH_EXPIRED_MARK = '<brain-recall-status kind="auth-expired">'
+# Runtimes whose hook output renders `systemMessage` to the user. OpenCode and Cursor show their own
+# notices (a toast; no channel at all), so this script adds none for them.
+_NOTICE_TAGS = {"cc", "cx"}
+
+
+def notice_text(context: str) -> str:
+    """The one-line, user-only notice for a prompt's recall, e.g.
+    ``codecollab: recalled 8,571 chars · acme/widget@main``. First written for the Codex adapter."""
+    if _AUTH_EXPIRED_MARK in context:
+        return 'codecollab: recall offline — session expired, say "log in"'
+    match = _MEMORY_RE.search(context)
+    if not match:
+        return "codecollab: no memory recalled"
+    attrs = dict(_ATTR_RE.findall(match.group(1)))
+    where = attrs.get("repo", "")
+    if where and attrs.get("branch"):
+        where += f"@{attrs['branch']}"
+    return f"codecollab: recalled {len(match.group(2)):,} chars" + (f" · {where}" if where else "")
+
+
+def _prompts_dir() -> str:
+    path = os.path.join(capture._cache_dir(), capture._client_tag(), "prompts")
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    return path
+
+
+def stash_prompt(session_id: str, cwd: str, prompt: str) -> None:
+    """Remember this session's current prompt for a no-query ``codecollab_recall`` call, which is
+    answered by a separate MCP process that is not told the prompt. Overwritten every prompt; holds
+    only what the user just typed, under the private cache."""
+    if not (session_id and prompt):
+        return
+    try:
+        path = os.path.join(_prompts_dir(), f"{capture._slugify(session_id) or 'session'}.json")
+        tmp = f"{path}.{os.getpid()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump({"session_id": session_id, "cwd": cwd, "prompt": prompt[:20_000], "ts": time.time()}, fh)
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def current_prompt(session_id: str | None, cwd: str | None, max_age_s: float = 6 * 3600) -> dict | None:
+    """The stashed prompt for ``session_id``; without one, the newest prompt stashed for ``cwd``,
+    or for any workspace when ``cwd`` is None (a host that tells its MCP server neither the session
+    nor the workspace, e.g. Codex)."""
+    try:
+        names = os.listdir(_prompts_dir())
+    except OSError:
+        return None
+    best = None
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(_prompts_dir(), name), encoding="utf-8") as fh:
+                entry = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(entry, dict) or time.time() - float(entry.get("ts") or 0) > max_age_s:
+            continue
+        if session_id:
+            if entry.get("session_id") == session_id:
+                return entry
+        elif (cwd is None or entry.get("cwd") == cwd) and (best is None or entry["ts"] > best["ts"]):
+            best = entry
+    return best
+
+
+def inject_enabled(source: str) -> bool:
+    """`VONIC_CODECOLLAB_RECALL_INJECT=0` turns AUTOMATIC recall off — the backend query itself,
+    not just the block. An explicit tool call (`recall_source: tool`) is never affected."""
+    return source == "tool" or os.environ.get("VONIC_CODECOLLAB_RECALL_INJECT", "1") != "0"
 
 
 def _wrap(answer: str, scope: dict | None) -> str:
@@ -552,23 +631,40 @@ def main() -> int:
     except Exception:  # noqa: BLE001
         return 0
     is_claude = capture._client_tag() == "cc"
+    # A UserPromptSubmit hook payload IS the user's own prompt on any runtime (Codex sends no
+    # recall_source of its own); other callers name their source and caller mode explicitly.
+    user_prompt = is_claude or payload.get("hook_event_name") == "UserPromptSubmit"
     source = str(payload.get("recall_source") or
-                 ("user-prompt-submit" if is_claude else "unknown")).strip()
-    mode = str(payload.get("caller_mode") or ("primary" if is_claude else "unknown")).strip()
+                 ("user-prompt-submit" if user_prompt else "unknown")).strip()
+    mode = str(payload.get("caller_mode") or ("primary" if user_prompt else "unknown")).strip()
     os.environ["VONIC_CODECOLLAB_RECALL_SOURCE"] = (
-        source if source in {"tool", "system-transform", "user-prompt-submit"} else "unknown"
+        source if source in {"tool", "system-transform", "user-prompt-submit", "subagent-start"} else "unknown"
     )
     os.environ["VONIC_CODECOLLAB_CALLER_MODE"] = (
         mode if mode in {"primary", "subagent", "all"} else "unknown"
     )
+    event = str(payload.get("hook_event_name") or "UserPromptSubmit")
+    event = event if event in _HOOK_EVENTS else "UserPromptSubmit"
+    # A subagent's recall is for its task alone: it must not touch the PARENT's per-session state
+    # (turn marker, pending rulebook section, entity-history "already shown" marks) and carries no
+    # instruction texts — those belong to the conversation, which the subagent is not.
+    subagent = mode == "subagent"
+    if subagent and (os.environ.get("VONIC_CODECOLLAB_RECALL_SUBAGENTS", "1") == "0"):
+        return 0
+    # Only the user's own prompt gets a visible notice; a subagent's recall is not announced (the
+    # user did not ask for that turn) and a tool result is already visible.
+    notice_on = (source == "user-prompt-submit" and capture._client_tag() in _NOTICE_TAGS
+                 and os.environ.get("VONIC_CODECOLLAB_RECALL_NOTICE", "1") != "0")
+    attempted = False
     # UserPromptSubmit is the START boundary of a turn, independent of recall — the marker is
     # stamped before every early return below (slash commands, empty prompts, recall disabled)
     # so `capture.py turn` can scope its repository report to this turn alone.
-    try:
-        import repo_activity  # noqa: PLC0415 — lazy + optional, same as capture's call site
-        repo_activity.mark_turn_start(payload)
-    except Exception as exc:  # noqa: BLE001 — never block the prompt
-        _debug(f"turn marker: {exc}")
+    if not subagent:
+        try:
+            import repo_activity  # noqa: PLC0415 — lazy + optional, same as capture's call site
+            repo_activity.mark_turn_start(payload)
+        except Exception as exc:  # noqa: BLE001 — never block the prompt
+            _debug(f"turn marker: {exc}")
 
     # Strip harness-injected `<system-reminder>` banners (e.g. Claude Code's per-turn plan-mode
     # notice) before the slash-command check and before anything is sent to vonic_query — this is
@@ -577,6 +673,14 @@ def main() -> int:
     prompt = capture.strip_system_reminders(payload.get("prompt") or "")
     if not prompt or prompt.startswith("/"):  # not a model turn — inject nothing at all
         return 0
+    if source == "user-prompt-submit" and not subagent:
+        # Only a person's prompt is "the current prompt" a no-query recall tool call searches: a
+        # program's (heartbeat, task notice) gets no recall at all (TODOS #92).
+        entry_point = (os.environ.get("CLAUDE_CODE_ENTRYPOINT")
+                       or os.environ.get("VONIC_CODECOLLAB_ENTRYPOINT"))
+        if capture.prompt_sender(prompt, entrypoint=entry_point)["kind"] == "person":
+            stash_prompt(str(payload.get("session_id") or ""), str(payload.get("cwd") or os.getcwd()),
+                         _strip_handoff(prompt) or prompt)
 
     # ONE additionalContext payload, assembled from independent parts. Something about citing
     # repositories rides on EVERY model turn, whether or not memory is recalled, so it is added up
@@ -588,7 +692,9 @@ def main() -> int:
     legacy = provenance.instructions_mode() == "legacy"
     prov_text, feedback_text, resolve_text = provenance.instruction_texts()
     parts: list[str] = []
-    if legacy:
+    if subagent:
+        pass
+    elif legacy:
         if provenance.is_provenance_enabled():
             parts.append(prov_text)
         # Legacy delivers nothing at session start, so the file-history paragraph rides each prompt
@@ -600,7 +706,7 @@ def main() -> int:
         parts.append(provenance.session_reminder())
     # Rulebook: when the session started without a cached rulebook, the background refresh's fresh
     # section is injected once, on the first prompt after it lands (instructions.py marked it).
-    if rulebook.enabled() and provenance.hook_injects_instructions():
+    if not subagent and rulebook.enabled() and provenance.hook_injects_instructions():
         try:
             pending = rulebook.claim_pending(payload.get("session_id"),
                                              payload.get("cwd") or os.getcwd())
@@ -611,10 +717,14 @@ def main() -> int:
 
     def _flush() -> int:
         if parts:
-            _emit_context("\n\n".join(parts))
+            context = "\n\n".join(parts)
+            _emit_context(context, event, notice_text(context) if (notice_on and attempted) else None)
         return 0
 
     if os.environ.get("VONIC_RECALL_ENABLED", "1") != "1":
+        return _flush()
+    if not inject_enabled(source):
+        _log(f"inject-off  prompt={prompt[:60]!r}  VONIC_CODECOLLAB_RECALL_INJECT=0 — no query")
         return _flush()
     prompt = _strip_handoff(prompt)
     if not prompt:  # a handoff with no question after it: nothing to search on
@@ -639,6 +749,7 @@ def main() -> int:
         _log(f"unscoped  prompt={prompt[:60]!r}  no repository scope — recall skipped")
         return _flush()
 
+    attempted = True
     try:
         answer = _query(prompt, scope)
     except AuthExpired as exc:
@@ -677,7 +788,8 @@ def main() -> int:
     _log(f"inject  {len(answer)}c  prompt={prompt[:60]!r}  ::  {snippet}")
 
     parts.append(_wrap(answer, scope))   # explicit provenance — see _emit_context
-    _note_entity_history(answer, payload.get("session_id"))
+    if not subagent:
+        _note_entity_history(answer, payload.get("session_id"))
     parts.extend(tail)
     return _flush()
 

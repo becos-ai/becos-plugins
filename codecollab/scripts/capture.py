@@ -1106,6 +1106,17 @@ def _new_turn(line: dict, user_text: str) -> dict:
     ts = line.get("timestamp")
     if isinstance(ts, str) and ts:
         turn["turn_meta"]["started_at"] = ts
+    # Observation identity, never wire data (both are popped before a turn is recorded). Claude
+    # stamps `promptId` on the prompt line with the same value its UserPromptSubmit hook receives as
+    # `prompt_id`, which is what makes "was this prompt observed?" an exact lookup. A forked
+    # session copies every inherited line with `forkedFrom` naming the parent.
+    prompt_id = line.get("promptId")
+    if isinstance(prompt_id, str) and prompt_id:
+        turn["prompt_id"] = prompt_id
+    forked = line.get("forkedFrom")
+    if isinstance(forked, dict) and isinstance(forked.get("sessionId"), str) and forked["sessionId"]:
+        turn["inherited_from"] = {"session_id": forked["sessionId"],
+                                  "message_uuid": str(forked.get("messageUuid") or "")}
     return turn
 
 
@@ -1234,6 +1245,10 @@ def _parse_session(transcript_path: str, default_cwd: str | None = None) -> list
             cur = _new_turn(line, _blocks_text(content))
             pending = {}
         elif line.get("type") == "assistant" and cur is not None:
+            forked = line.get("forkedFrom")
+            if cur.get("inherited_from") and isinstance(forked, dict) and forked.get("messageUuid"):
+                # The fork boundary is the LAST inherited message, which is usually a reply.
+                cur["inherited_from"]["message_uuid"] = str(forked["messageUuid"])
             if cur.get("cwd") is None:
                 cur["cwd"] = line.get("cwd")   # human prompt lacked one; use the reply's
             txt = _blocks_text(content)
@@ -3098,11 +3113,94 @@ def _maybe_auto_project(cwd: str, session_id: str, *, final: bool = False,
             f"{resolved.name}{where}. To use a different one, ask the agent or run {command}.")
 
 
-def _record_turns(event: dict, done: bool, repos: dict | None = None) -> str | None:
+# ── observation ledger (observed-only capture) ───────────────────────────────
+#
+# A turn is captured only if this plugin was loaded and enabled when its prompt was submitted
+# (docs/DECISIONS.md, 2026-10-23). The UserPromptSubmit hook (`capture.py observe`) writes the
+# prompt's id here; `turn` records a transcript turn only when its `promptId` is present, then
+# removes the id. So a resumed session resends nothing, a turn typed while capture was disabled
+# (or the plugin was off) is never uploaded later, a session attached mid-turn starts at its next
+# prompt, and a fork's inherited turns — submitted in the parent, never here — stay out. Turns
+# already observed but not yet recorded (a missed Stop) are still recorded at the next Stop.
+
+_MAX_OBSERVED = 2_000
+
+
+def _observed_path(session_id: str) -> str:
+    path = os.path.join(_sessions_dir(), "observed")
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    return os.path.join(path, f"{_slugify(session_id) or 'session'}.json")
+
+
+def observe_prompt(session_id: str, prompt_id: str) -> None:
+    """UserPromptSubmit: record that this prompt was submitted while the plugin was watching."""
+    if not (isinstance(session_id, str) and session_id and isinstance(prompt_id, str) and prompt_id):
+        return
+    path = _observed_path(session_id)
+    with _locked(path):
+        ledger = _load_buffer(path) or {"session_id": session_id, "observed": []}
+        observed = [p for p in ledger.get("observed") or [] if isinstance(p, str) and p != prompt_id]
+        observed.append(prompt_id[:200])
+        ledger["observed"] = observed[-_MAX_OBSERVED:]
+        ledger["updated_at"] = _iso_now()
+        _save_buffer(path, ledger)
+
+
+def _prune_observed(max_age_days: int = 30) -> None:
+    """SessionStart: drop ledgers for sessions untouched for a month (ids only, no content)."""
+    cutoff = time.time() - max_age_days * 86400
+    for path in glob.glob(os.path.join(_sessions_dir(), "observed", "*.json")):
+        try:
+            if os.path.getmtime(path) < cutoff:
+                os.remove(path)
+        except OSError:
+            pass
+
+
+def _record_fork(session_id: str, cwd: str, turns: list[dict]) -> None:
+    """Record the observed fork once, as a lineage fact. Inherited turns are never re-captured."""
+    inherited = [t["inherited_from"] for t in turns if isinstance(t.get("inherited_from"), dict)]
+    if not inherited:
+        return
+    parent = inherited[-1].get("session_id") or ""
+    boundary = inherited[-1].get("message_uuid") or ""
+    own = next((t for t in turns if not t.get("inherited_from")), None)
+    occurred = ((own or {}).get("turn_meta") or {}).get("started_at") or _iso_now()
+    payload = {"client_tag": _client_tag(), "session_id": session_id, "cwd": cwd,
+               "source_event_id": f"fork:{parent}:{boundary}", "occurred_at": occurred,
+               "type": "fork", "parent_session_id": parent}
+    if boundary:
+        payload["boundary"] = {"type": "through", "message_id": boundary}
+    try:
+        import lifecycle  # noqa: PLC0415 — only a fork needs it
+        result = lifecycle.append(payload, send=False)
+    except Exception as exc:  # noqa: BLE001 — a lineage fact must never block capture
+        _debug(f"fork fact not recorded: {type(exc).__name__}")
+        return
+    if result.get("appended"):
+        # Delivery is detached, like a turn's: a Stop hook never waits on the network.
+        try:
+            subprocess.Popen(
+                [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lifecycle.py"),
+                 "retry", f"--cwd={cwd}"],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                start_new_session=True, env=os.environ.copy(),
+            )
+        except OSError as exc:
+            _debug(f"could not spawn lifecycle deliverer: {exc}")
+
+
+def _record_turns(event: dict, done: bool, repos: dict | None = None, *,
+                  observed_only: bool = True) -> str | None:
+    """Record a Claude Code transcript's new turns. ``observed_only=False`` is explicit backfill,
+    the user-requested path for history: it records every non-inherited turn and leaves the
+    observation ledger untouched."""
     session_id = event.get("session_id", "")
     cwd = event.get("cwd") or os.getcwd()
     path = _buffer_path(session_id)
     turns = _parse_session(event.get("transcript_path", ""), cwd)
+    if observed_only and any(t.get("inherited_from") for t in turns):
+        _record_fork(session_id, cwd, turns)
     # Scope each turn by the directory IT ran in, not one cwd for the whole session. `git`
     # subprocesses stay outside the lock and cost one call per DISTINCT cwd (cached), not per
     # turn — a mixed session has a handful of directories, not hundreds. A turn with no recorded
@@ -3125,12 +3223,29 @@ def _record_turns(event: dict, done: bool, repos: dict | None = None) -> str | N
             for slot, index in enumerate(indexes):
                 if isinstance(resolved[slot], dict):
                     capture_paths[index] = resolved[slot]
-    with _locked(path):
-        buf = _load_buffer(path) or _new_buffer(session_id, cwd)
+    ledger_path = _observed_path(session_id)
+    with _locked(path), _locked(ledger_path):
+        existing = _load_buffer(path)
+        ledger = _load_buffer(ledger_path)
+        # Upgrade bridge: a session this plugin was already capturing before the observe hook
+        # existed has a buffer but no ledger. Keep its old rule once, then require observation.
+        legacy = (not ledger and bool(existing)) or not observed_only
+        observed_ids = [p for p in (ledger or {}).get("observed") or [] if isinstance(p, str)]
+        observed = set(observed_ids)
+        consumed: set[str] = set()
+        buf = existing or _new_buffer(session_id, cwd)
         _check_build(buf, session_id)
         seen = buf.get("turns_recorded", 0)
         today = time.strftime("%Y-%m-%d", time.gmtime())
         for i, t in enumerate(turns[seen:]):
+            prompt_id = t.pop("prompt_id", None)
+            if t.pop("inherited_from", None):
+                continue   # submitted in the parent session: referenced by the fork fact, not copied
+            # No `promptId` at all means a Claude Code that predates it: keep the old rule.
+            if prompt_id and not legacy and prompt_id not in observed:
+                continue   # submitted while this plugin was not watching: deliberately not captured
+            if prompt_id:
+                consumed.add(prompt_id)
             if not (t.get("user") or t.get("assistant")):
                 continue
             turn_cwd = t.get("cwd") or cwd
@@ -3188,6 +3303,11 @@ def _record_turns(event: dict, done: bool, repos: dict | None = None) -> str | N
         if done:
             buf["done"] = True
         _save_buffer(path, buf)
+        # A recorded prompt leaves the ledger, so re-parsing after a resume cannot resend it. The
+        # ledger is written even when empty: from here on this session requires observation.
+        if observed_only:
+            _save_buffer(ledger_path, {"session_id": session_id, "updated_at": _iso_now(),
+                                       "observed": [p for p in observed_ids if p not in consumed][-_MAX_OBSERVED:]})
         has_pending = any(not t.get("uploaded") for t in buf["turns"])
     # Dispatch when finalizing (done) too, so the last turn's already-uploaded buffer still gets a
     # final event="end" delivery + cleanup instead of lingering forever.
@@ -3338,6 +3458,12 @@ def main() -> int:
         _prune_orphan_locks()
         _first_run_notice()
         _repo_activity(lambda mod: mod.prune_markers())
+        _prune_observed()
+        try:   # lineage facts left pending by an offline Stop; bounded and fail-open
+            import lifecycle  # noqa: PLC0415
+            lifecycle.retry(None, limit=5)
+        except Exception as exc:  # noqa: BLE001
+            _debug(f"lifecycle retry: {type(exc).__name__}")
         return 0
 
     if mode == "deliver-session":
@@ -3366,6 +3492,13 @@ def main() -> int:
         event = json.load(sys.stdin)
     except (json.JSONDecodeError, ValueError) as exc:
         _debug(f"bad hook input: {exc}")
+        return 0
+
+    if mode == "observe":
+        # UserPromptSubmit. Runs only when capture is enabled (the DISABLED check above returns
+        # first), which is exactly what makes a disabled turn unobserved and therefore never sent.
+        if not hosted_by_opencode():
+            observe_prompt(str(event.get("session_id") or ""), str(event.get("prompt_id") or ""))
         return 0
 
     if mode in ("turn", "finalize") and hosted_by_opencode():

@@ -39,7 +39,8 @@ import capture  # noqa: E402
 import connect  # noqa: E402
 import gbrain_client  # noqa: E402
 
-# `resume` and `compact` continue a conversation that already carries its own context.
+# `resume` and `compact` continue a conversation that already carries its own context, and a
+# `fork` carries its parent's: none of them is a fresh session, so none gets a startup handoff.
 _SESSION_START_SOURCES = {"startup", "clear"}
 # Injected into EVERY fresh session, so far below the tool path's server default (120k chars);
 # the same order as recall.py's per-turn cap. Bounds match the server's accepted range.
@@ -88,6 +89,27 @@ _PREAMBLE = (
 )
 
 
+def repo_scope(cwd: str, session_id: str) -> tuple[str | None, str | None]:
+    """``(repo, branch)`` the handoff for this session is scoped to; ``repo`` None when there is none.
+
+    One function for both the fetch and the delivery check, so a checkpoint fetched for one
+    repository or branch is never handed to a session that has since moved to another."""
+    if capture._projects_on():
+        # The session's project (git repo with a remote, or the chosen project) — none yet means
+        # nothing to hand off; a later session in this folder resolves it.
+        resolved = capture._project(lambda mod: mod.resolve(cwd, session_id))
+        repo = resolved.key if resolved is not None else None
+    else:
+        repo = capture._origin_slug(cwd)
+        if not repo or repo.count("/") != 1 or any(not part.strip() for part in repo.split("/")):
+            repo = None
+    return (repo or None), (capture._branch_or_none(cwd) if repo else None)
+
+
+def scope_label(repo: str, branch: str | None) -> str:
+    return f"{repo}@{branch}" if branch else f"{repo} (all branches)"
+
+
 def fetch(request: dict) -> str:
     cwd = request.get("cwd")
     session_id = request.get("session_id")
@@ -96,20 +118,11 @@ def fetch(request: dict) -> str:
     if not isinstance(session_id, str) or not session_id:
         return "handoff unavailable: no active session id."
 
-    if capture._projects_on():
-        # The session's project (git repo with a remote, or the chosen project) — none yet means
-        # nothing to hand off; a later session in this folder resolves it.
-        resolved = capture._project(lambda mod: mod.resolve(cwd, session_id))
-        repo = resolved.key if resolved is not None else None
-        if not repo:
-            return "handoff unavailable: git origin has no org/repo slug."
-    else:
-        repo = capture._origin_slug(cwd)
-        if not repo or repo.count("/") != 1 or any(not part.strip() for part in repo.split("/")):
-            return "handoff unavailable: git origin has no org/repo slug."
+    repo, branch = repo_scope(cwd, session_id)
+    if not repo:
+        return "handoff unavailable: git origin has no org/repo slug."
 
     arguments = {"repo_name": repo, "exclude_session_id": session_id}
-    branch = capture._branch_or_none(cwd)
     if branch:
         arguments["branch_name"] = branch
     if request.get("startup") is True:
@@ -143,7 +156,7 @@ def fetch(request: dict) -> str:
         return f"handoff unavailable: {checkpoint.get('reason', 'event ledger unavailable')}."
     if not checkpoint.get("timeline"):
         return f"no prior session history for {repo}{'@' + branch if branch else ''}."
-    scope = f"{repo}@{branch}" if branch else f"{repo} (all branches)"
+    scope = scope_label(repo, branch)
     # Compact JSON: the server budgets `budget_chars` over compact JSON, and pretty-printing would
     # add ~17% on top (a 12k startup handoff reached the model as ~14k characters).
     return f"session history — {scope}\n" + json.dumps(data, ensure_ascii=False,
@@ -246,6 +259,10 @@ def session_start_fetch(event: dict) -> str | None:
     if path is None:
         return None
     request = {"cwd": event.get("cwd"), "session_id": event.get("session_id"), "startup": True}
+    try:
+        repo, branch = repo_scope(str(event.get("cwd") or ""), str(event.get("session_id") or ""))
+    except Exception:  # noqa: BLE001 — the fetch below reports the same failure properly
+        repo, branch = None, None
     status, text = "failed", ""
     for attempt in range(1, _FETCH_ATTEMPTS + 1):
         try:
@@ -259,6 +276,8 @@ def session_start_fetch(event: dict) -> str | None:
     if not os.path.exists(path):
         return None   # the session ended meanwhile: do not resurrect its state
     state = {"status": status, "written_at": time.time()}
+    if repo:
+        state["scope"] = scope_label(repo, branch)
     state["text" if status == "ready" else "detail"] = text if status == "ready" else text[:300]
     connect._atomic_write(path, state)
     return status
@@ -288,11 +307,111 @@ def prompt_submit(payload: dict) -> str | None:
     text = state.get("text")
     if not isinstance(text, str) or not text.startswith("session history"):
         return None
+    if isinstance(state.get("scope"), str) and not _same_scope(state["scope"], payload):
+        # The session moved to another repository or branch since the fetch: that checkpoint
+        # describes somewhere else. Retire it rather than hand over the wrong history.
+        connect._atomic_write(path, {"status": "stale", "written_at": time.time(),
+                                     "detail": "scope changed since the fetch"})
+        return None
     try:
         os.replace(path, path + _CONSUMED)   # atomic claim: a racing second hook loses here
     except FileNotFoundError:
         return None
     return format_handoff(text)
+
+
+def _same_scope(fetched: str, payload: dict) -> bool:
+    """Whether the session's scope now is the one the checkpoint was fetched for (fail-open)."""
+    cwd, session_id = payload.get("cwd"), payload.get("session_id")
+    if not isinstance(cwd, str) or not cwd or not isinstance(session_id, str):
+        return True   # nothing to compare against: keep the pre-check behaviour
+    try:
+        repo, branch = repo_scope(cwd, session_id)
+    except Exception:  # noqa: BLE001
+        return True
+    return bool(repo) and scope_label(repo, branch) == fetched
+
+
+# The first line of fetch()'s text names the scope; the next line is the checkpoint as one JSON line.
+_SCOPE_RE = re.compile(r"^session history — (.+)$", re.M)
+_JSON_RE = re.compile(r"^(\{.*\})$", re.M)
+
+
+def notice_text(context: str) -> str:
+    """The one-line, user-only notice for a delivered handoff, e.g.
+    ``codecollab: added handoff · 19 turns · acme/widget@main``. Never model context."""
+    parts = ["codecollab: added handoff"]
+    match = _JSON_RE.search(context)
+    if match:
+        try:
+            turns = json.loads(match.group(1))["checkpoint"]["selection"]["included_turns"]
+            if isinstance(turns, int) and not isinstance(turns, bool):
+                parts.append(f"{turns} turn" + ("" if turns == 1 else "s"))
+        except (ValueError, KeyError, TypeError):
+            pass
+    scope = _SCOPE_RE.search(context)
+    if scope:
+        parts.append(scope.group(1).strip())
+    return " · ".join(parts)
+
+
+def notice_enabled() -> bool:
+    return os.environ.get("VONIC_CODECOLLAB_HANDOFF_NOTICE", "1") != "0"
+
+
+def tool_report(session_id: str | None, cwd: str, budget_chars: int | None = None) -> str:
+    """The ``codecollab_handoff`` tool's view of this session's startup handoff.
+
+    With an automatic fetch scheduled it reports that state, or hands a ``ready`` result over once
+    (the automatic delivery then finds it claimed). With none (auto off, a resumed session, a
+    plugin loaded after the session began) it fetches at most once on demand. Shared by every
+    client that exposes the tool, so the wording and the one-fetch rule cannot drift apart."""
+    if not session_id:
+        return "handoff unavailable: no active session."
+    path = _state_path(session_id)
+    if path is None:
+        return "handoff unavailable: unrecognised session id."
+    if os.path.exists(path + _CONSUMED):
+        return ("The repository handoff was already added to this session (a <repository-handoff> "
+                "block). It is not fetched again.")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            state = json.load(fh)
+    except (OSError, ValueError):
+        state = None
+    if isinstance(state, dict):
+        current = state.get("status")
+        if current == "pending":
+            return ("The automatic repository handoff is still loading in the background and is added "
+                    "to the session once ready. Do not call this tool again.")
+        if current == "ready":
+            framed = prompt_submit({"session_id": session_id, "cwd": cwd, "prompt": "tool request"})
+            return framed or "The repository handoff was just delivered by another call."
+        detail = state.get("detail") or ""
+        if current == "empty":
+            return detail or "no prior session history for this repository."
+        if current == "stale":
+            return "The startup handoff was fetched for another repository or branch and was dropped."
+        return f"automatic handoff failed and is not retried this session: {detail or 'unknown error'}"
+    if os.environ.get("VONIC_CODECOLLAB_DISABLED") == "1":
+        return "CodeCollab is disabled for this session."
+    connect._atomic_write(path + _CONSUMED, {"status": "on-demand", "written_at": time.time()})
+    request: dict = {"cwd": cwd, "session_id": session_id}
+    if isinstance(budget_chars, int) and not isinstance(budget_chars, bool):
+        request["budget_chars"] = min(max(budget_chars, _MIN_BUDGET), _MAX_BUDGET)
+    try:
+        text = fetch(request)
+    except Exception as exc:  # noqa: BLE001 — fail open without leaking payloads
+        text = f"handoff unavailable: {type(exc).__name__}"
+    if not (text.startswith("session history") or text.startswith("no prior session history")):
+        try:
+            os.remove(path + _CONSUMED)   # a failure may be retried by a later call
+        except OSError:
+            pass
+        return text
+    # Framed like the automatic delivery: the preamble states whose evidence this is (the user AND
+    # their team, each turn naming its author), which an on-demand reader needs just as much.
+    return format_handoff(text) if text.startswith("session history") else text
 
 
 def session_end(payload: dict) -> None:
@@ -316,9 +435,11 @@ def _run_hook(handler, *, emit: str | None = None) -> int:
             return 0
         context = handler(payload)
         if emit and isinstance(context, str) and context:
-            print(json.dumps({
-                "hookSpecificOutput": {"hookEventName": emit, "additionalContext": context}
-            }))
+            out: dict = {"hookSpecificOutput": {"hookEventName": emit, "additionalContext": context}}
+            # Shown to the user, never to the model (Claude Code and Codex both render it).
+            if notice_enabled():
+                out["systemMessage"] = notice_text(context)
+            print(json.dumps(out))
     except Exception:  # noqa: BLE001 — never block or pollute a session or a prompt
         pass
     return 0

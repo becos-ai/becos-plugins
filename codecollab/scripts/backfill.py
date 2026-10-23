@@ -1,9 +1,13 @@
 """One-off backfill of existing Claude Code sessions into memory.
 
-codecollab captures sessions going forward, and fully backfills any session you *continue*
-(the Stop hook reads the whole transcript). This sweeps sessions you will not reopen —
-the transcripts under ``~/.claude/projects/<slug>/<session>.jsonl`` — through the same
-parse -> record -> deliver path, so historical turns land in the backend too.
+codecollab captures only the turns it observes: a prompt submitted while the plugin was loaded
+and enabled. Continuing an older session does NOT upload its earlier turns (docs/DECISIONS.md,
+2026-10-23), so this is the one way to ingest history — the transcripts under
+``~/.claude/projects/<slug>/<session>.jsonl``, through the same parse -> record -> deliver path.
+
+Forked sessions are never backfilled: their inherited turns belong to the parent session, and the
+fork's own live turns plus its lineage fact replace any replay. They are listed as skipped, and
+naming one with ``--session`` is refused.
 
 Safe by default: a DRY RUN just lists what it would ingest. Pass --deliver to actually ship
 (needs the same env as live delivery: VONIC_BECOS_URL / VONIC_GBRAIN_URL, VONIC_TENANT_ID /
@@ -123,12 +127,15 @@ def discover() -> list[dict]:
             turns = [t for t in capture._parse_session(tp) if t.get("user") or t.get("assistant")]
         except Exception:
             turns = []
+        parent = next((t["inherited_from"]["session_id"] for t in turns
+                       if isinstance(t.get("inherited_from"), dict)), None)
         rows.append(
             {
                 "project": os.path.basename(os.path.dirname(tp)),
                 "session": os.path.splitext(os.path.basename(tp))[0],
                 "path": tp,
                 "turns": len(turns),
+                **({"fork_of": parent} if parent else {}),
             }
         )
     return rows
@@ -243,7 +250,7 @@ def _async_deliver(rows: list[dict], timeout: float, watch: bool, batch_id: str)
         event = {"session_id": r["session"], "transcript_path": r["path"],
                  "cwd": _cwd_from_transcript(r["path"])}
         try:
-            buffer_path = capture._record_turns(event, done=True)
+            buffer_path = capture._record_turns(event, done=True, observed_only=False)
         except Exception as exc:  # noqa: BLE001 — one bad transcript must not stop the sweep
             skipped.append(r["session"])
             print(f"  err   {label}: {str(exc)[:70]}")
@@ -303,7 +310,7 @@ def _sync_deliver(rows: list[dict], retries: int) -> int:
             "cwd": _cwd_from_transcript(r["path"]),
         }
         try:
-            buffer_path = capture._record_turns(event, done=True)
+            buffer_path = capture._record_turns(event, done=True, observed_only=False)
         except Exception as exc:  # noqa: BLE001 — one bad transcript must not stop the sweep
             errored.append(r["session"])
             print(f"  err  {label}: {str(exc)[:80]}")
@@ -341,6 +348,14 @@ def main() -> int:
         rows = [r for r in rows
                 if r["session"] in sess_filter or any(r["session"].startswith(s) for s in sess_filter)]
 
+    # Forks never backfill (DECISIONS.md 2026-10-23): their inherited turns are the parent's.
+    forks = [r for r in rows if r.get("fork_of")]
+    rows = [r for r in rows if not r.get("fork_of")]
+    if forks and sess_filter and not rows:
+        for r in forks:
+            print(f"refused: {r['session']} is a fork of {r['fork_of']} — forked sessions are never backfilled")
+        return 2
+
     # ── breakdown: projects, then (when a scope is given) sessions → turns ───────
     by = OrderedDict()
     for r in rows:
@@ -362,6 +377,10 @@ def main() -> int:
         print(f"  {name}  ({by[name]['sessions']} sessions, {by[name]['turns']} turns)")
         for r in sorted((r for r in rows if r["project"] == name), key=lambda r: -r["turns"]):
             print(f"    {r['session']:<46}{r['turns']:>6} turns")
+    if forks:
+        print(f"\nskipped {len(forks)} forked session(s) — never backfilled:")
+        for r in forks:
+            print(f"    {r['session']:<46} fork of {r['fork_of']}")
 
     if not deliver:
         # Ready-to-run commands, using real values from the largest in-scope project/session.

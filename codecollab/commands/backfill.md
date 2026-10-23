@@ -4,8 +4,10 @@ argument-hint: "[project] [session-id ...] [--async] [--campaign name] [--watch]
 ---
 
 Ingest the user's **pre-existing** Claude Code session transcripts into becos memory. codecollab
-captures sessions going forward and fully backfills any session the user *reopens* (the Stop hook
-reads the whole transcript); this command sweeps the sessions they will *not* reopen.
+captures only the turns it observes — prompts submitted while the plugin was loaded and enabled — so
+reopening an older session does **not** upload its earlier turns. This command is the one way to
+ingest that history. Forked sessions are never backfilled (their inherited turns are the parent's);
+the dry run lists them as skipped and naming one is refused.
 
 Parse `$ARGUMENTS`: the first bare word (if any) is a **project** substring; any bare
 UUID-ish tokens are **session ids/prefixes**; `--async`, `--watch`, `--campaign <name>` pass
@@ -29,9 +31,9 @@ Do the steps in order. **Never run `--deliver` before the user has seen the dry 
    python3 <path-to-backfill.py>            # add: --project P  --session ID ...  --async   (as given)
    ```
 
-   It prints a **projects → sessions → turns** breakdown (per-session detail appears once a
-   `--project` or `--session` scope is given). **Show that breakdown to the user.** If they gave no
-   scope, it's the whole history by project — offer to narrow to a project or specific sessions.
+   It prints a **projects → sessions → turns** breakdown. **Show it to the user verbatim** — every
+   session id and its turn count, and the skipped forks — not a summary or just the totals. If they
+   gave no scope, it's the whole history by project — offer to narrow to a project or sessions.
 
 3. **Summarize and ask.** Report the totals in scope (N sessions / M turns). Tell the user:
    - It is **idempotent** — safe to re-run; the server dedups per turn and (in `--async`) a stable
@@ -43,7 +45,8 @@ Do the steps in order. **Never run `--deliver` before the user has seen the dry 
 
    Ask them to confirm the scope + target before delivering.
 
-4. **Only after an explicit yes**, deliver:
+4. **Only after an explicit yes**, deliver. Claude Code then asks the user to approve the delivery
+   command itself (any `backfill.py --deliver` run does); if they decline, nothing was sent.
 
    - **`--async` (recommended for large histories):** uploads each session once and returns; a
      server-side worker drains it turn-by-turn. Add `--watch` to poll status to completion, and
