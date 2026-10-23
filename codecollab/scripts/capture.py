@@ -691,6 +691,33 @@ _BASH_TOOLS = {"Bash"}
 # script is how `/codecollab:team` runs it from a shell.
 _TEAM_ACTIVITY_TOOLS = {"vonic_team_activity", "codecollab_team"}
 _TEAM_ACTIVITY_SCRIPT = "team_activity.py"
+# Programs that drive an agent (OpenClaw's heartbeat, CI agents, monitors) and Claude Code's own
+# background-task notices arrive as ordinary user messages. Such a turn is labelled with who sent it,
+# so recall skips it and the server does not store the job's instructions as the person's rules
+# (TODOS #92). Strongest signal first: Claude Code's own per-message `origin`, then what the program
+# declares when it starts the agent (`VONIC_CODECOLLAB_SOURCE=automation:<name>`, or `=person` to say
+# it is not one), then known prompt shapes. A headless start (`entrypoint: sdk-cli`) is only a hint:
+# the benchmark runs `claude -p` too and needs recall, so heartbeat-like text counts only there.
+_SOURCE_ENV = "VONIC_CODECOLLAB_SOURCE"
+_SENDER_ORIGINS = {"task-notification": "program", "peer": "agent"}
+_DECLARED_KINDS = {"automation": "program", "program": "program", "agent": "agent"}
+_TASK_NOTIFICATION_RE = re.compile(r"\A\s*<task-notification>")
+_HEADLESS_SHAPES = (
+    (re.compile(r"\bHEARTBEAT_OK\b"), "heartbeat"),
+    (re.compile(r"\A\s*System:"), "system-notice"),   # OpenClaw writes this as plain user text
+)
+# A non-interactive start: Claude Code's `claude -p` / Agent SDK, Codex's `codex exec` (the Codex
+# adapter passes its rollout's `source`). Cursor's `cursor-agent -p` fires no hooks at all.
+_HEADLESS_ENTRYPOINTS = {"sdk-cli", "exec"}
+_MAX_SENDER_NAME = 64
+_SENDER_KEYS = ("kind", "signal", "name", "entrypoint", "capture")
+# What is kept of a program's turns: `off` (not sent at all), `results` (default: the server keeps
+# what the job found or changed) or `everything` (stored like a person's turn). Set per tool or job
+# with VONIC_CODECOLLAB_AUTOMATIONS, or per folder with a `.becos-automations` file holding the word
+# (the nearest one from the turn's directory upward). The environment wins.
+_AUTOMATIONS_ENV = "VONIC_CODECOLLAB_AUTOMATIONS"
+_AUTOMATIONS_FILE = ".becos-automations"
+AUTOMATION_MODES = ("off", "results", "everything")
 # Tools whose input is understood well enough to lift a path from. Anything else (Task/Agent,
 # AskUserQuestion, ToolSearch, every mcp__* tool) is deliberately absent.
 _PATH_TOOLS = _READ_TOOLS | _SEARCH_TOOLS | _EDIT_TOOLS
@@ -977,13 +1004,100 @@ def _cap(text: str, n: int) -> str:
     return text if len(text) <= n else text[:n] + "\n[truncated]"
 
 
+def declared_sender() -> dict | None:
+    """What the program that started this agent declared in ``VONIC_CODECOLLAB_SOURCE``:
+    ``automation:<name>`` (or ``agent:<name>``), or ``person``. ``None`` when unset or unreadable."""
+    raw = os.environ.get(_SOURCE_ENV, "").strip()
+    if not raw:
+        return None
+    label, _, name = raw.partition(":")
+    label = label.strip().lower()
+    if label == "person":
+        return {"kind": "person", "signal": "declared"}
+    kind = _DECLARED_KINDS.get(label)
+    if kind is None:
+        return None
+    sender = {"kind": kind, "signal": "declared"}
+    if name.strip():
+        sender["name"] = name.strip()[:_MAX_SENDER_NAME]
+    return sender
+
+
+def prompt_sender(text: str, *, origin: object = None, entrypoint: object = None) -> dict:
+    """Who sent a prompt: ``{"kind": "person" | "program" | "agent", "signal", "name"?,
+    "entrypoint"?}`` (TODOS #92). ``origin`` is the transcript line's own tag, ``entrypoint`` how
+    the agent was started."""
+    sender = None
+    tag = origin.get("kind") if isinstance(origin, dict) else None
+    if tag in _SENDER_ORIGINS:
+        sender = {"kind": _SENDER_ORIGINS[tag], "signal": "origin", "name": tag}
+    if sender is None:
+        sender = declared_sender()
+    if sender is None and _TASK_NOTIFICATION_RE.search(text or ""):
+        sender = {"kind": "program", "signal": "shape", "name": "task-notification"}
+    if sender is None and entrypoint in _HEADLESS_ENTRYPOINTS:
+        for pattern, name in _HEADLESS_SHAPES:
+            if pattern.search(text or ""):
+                sender = {"kind": "program", "signal": "shape", "name": name}
+                break
+    if sender is None:
+        sender = {"kind": "person", "signal": "default"}
+    if isinstance(entrypoint, str) and entrypoint:
+        sender["entrypoint"] = entrypoint[:_MAX_SENDER_NAME]
+    return sender
+
+
+def _automations_file(cwd: str | None) -> str | None:
+    """The nearest ``.becos-automations`` from ``cwd`` upward, stopping below home."""
+    home = os.path.realpath(os.path.expanduser("~"))
+    path = os.path.realpath(cwd or os.getcwd())
+    while path != home and path != os.path.dirname(path):
+        candidate = os.path.join(path, _AUTOMATIONS_FILE)
+        if os.path.isfile(candidate) and not os.path.islink(candidate):
+            return candidate
+        path = os.path.dirname(path)
+    return None
+
+
+def automation_mode(cwd: str | None) -> str:
+    """How much of a program's turn is kept here: ``off`` | ``results`` | ``everything``."""
+    raw = os.environ.get(_AUTOMATIONS_ENV, "").strip().lower()
+    if not raw:
+        found = _automations_file(cwd)
+        try:
+            with open(found, encoding="utf-8") as fh:
+                raw = fh.read(64).strip().lower() if found else ""
+        except (OSError, TypeError):
+            raw = ""
+    return raw if raw in AUTOMATION_MODES else "results"
+
+
+def turn_sender(turn: dict, cwd: str | None = None) -> dict:
+    """The turn's sender: the parser's label, else read from the prompt (adapters that send none),
+    with ``capture: everything`` added when the person asked to keep a program's turns whole."""
+    sender = turn.get("sender")
+    if not isinstance(sender, dict):
+        sender = prompt_sender(str(turn.get("user") or ""), entrypoint=turn.get("entrypoint"))
+    if sender.get("kind") != "person" and automation_mode(turn.get("cwd") or cwd) == "everything":
+        sender = {**sender, "capture": "everything"}
+    return sender
+
+
+def _program_turn_off(turn: dict, cwd: str | None) -> bool:
+    """A program's turn the person turned off for this tool or folder: it is not sent at all."""
+    return (turn_sender(turn, cwd).get("kind") != "person"
+            and automation_mode(turn.get("cwd") or cwd) == "off")
+
+
 def _new_turn(line: dict, user_text: str) -> dict:
     # `cwd` rides on every transcript line; keep the turn's own so scope is per-turn,
     # not one directory for the whole session (a session can span several repos).
     turn = {"user": user_text, "assistant": [], "files": [],
             "thinking": [], "code_edits": [], "cwd": line.get("cwd"),
             "tool_events": [], "file_ops": [], "source_message_ids": [],
-            "turn_meta": {}, "excluded": _is_login_command(user_text)}
+            "turn_meta": {}, "excluded": _is_login_command(user_text),
+            "sender": prompt_sender(user_text, origin=line.get("origin"),
+                                    entrypoint=line.get("entrypoint"))}
     message = line.get("message") if isinstance(line.get("message"), dict) else {}
     message_id = message.get("id")
     uid = message_id if isinstance(message_id, str) and message_id else line.get("uuid")
@@ -1146,7 +1260,8 @@ def _parse_session(transcript_path: str, default_cwd: str | None = None) -> list
                 cur["turn_meta"]["completed_at"] = ts
     if cur:
         turns.append(cur)
-    turns = [t for t in turns if not t.pop("excluded", False)]
+    turns = [t for t in turns
+             if not t.pop("excluded", False) and not _program_turn_off(t, default_cwd)]
     toplevels: dict[str, str | None] = {}
     for t in turns:
         t["assistant"] = "\n".join(t["assistant"]).strip()
@@ -1806,6 +1921,14 @@ def _capture_context(resolved: dict | None, git: dict, turn: dict,
     # that sends no tool events (Codex) marks the turn itself with `team_activity: true`.
     if turn.get("team_activity") is True or _used_team_activity(turn.get("tool_events")):
         ctx["team_activity"] = True
+
+    # Who sent the prompt (TODOS #92): a program's or another agent's turn, and any headless start,
+    # carries the label; an ordinary person's turn carries nothing.
+    sender = turn_sender(turn)
+    if (sender.get("kind") != "person"
+            or sender.get("entrypoint") in _HEADLESS_ENTRYPOINTS):
+        ctx["sender"] = {key: str(sender[key])[:_MAX_SENDER_NAME]
+                         for key in _SENDER_KEYS if sender.get(key)}
 
     if len(ctx) == 1:   # schema_version only — no real evidence to carry
         return None
@@ -3087,7 +3210,8 @@ def _record_session(session: dict, done: bool) -> str | None:
     session_id = session.get("session_id", "")
     cwd = session.get("cwd") or os.getcwd()
     tag = session.get("client_tag") or os.environ.get("VONIC_CODECOLLAB_CLIENT_TAG", "cc")
-    incoming = session.get("turns", []) or []
+    incoming = [t for t in session.get("turns", []) or []
+                if not (isinstance(t, dict) and _program_turn_off(t, cwd))]
     path = _buffer_path(session_id)
     git = _git_identity(cwd, session_id)
     # VONIC_CAPTURE_FILES=0 has to mean the same thing on every adapter. The Claude parser drops
