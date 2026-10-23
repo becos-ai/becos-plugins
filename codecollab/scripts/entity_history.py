@@ -22,7 +22,8 @@ with ``{"mode": "read"|"edit", "paths": [...], "cwd": ..., "session_id": ..., "m
 stdin, which prints ``{"text": <block or "">, "retry": RETRY_LINE}``.
 
 Settings: ``VONIC_CODECOLLAB_ENTITY_HISTORY`` (off), ``VONIC_CODECOLLAB_ENTITY_HISTORY_CHARS``
-(2,500 per file, 1,000-4,000), ``VONIC_ENTITY_HISTORY_TIMEOUT`` (8 s).
+(2,500 per file, 1,000-4,000), ``VONIC_ENTITY_HISTORY_TIMEOUT``
+(15 s, shared by every file of one read/edit).
 """
 
 from __future__ import annotations
@@ -41,7 +42,11 @@ import recall  # noqa: E402
 
 DEFAULT_CHARS = 2_500
 MIN_CHARS, MAX_CHARS = 1_000, 4_000
-DEFAULT_TIMEOUT = 8.0
+DEFAULT_TIMEOUT = 15.0
+# One read/edit shares ONE timeout budget across all of its files, so the deadline is also the
+# worst case for the tool that is waiting. A lookup with less than this left is not started at all:
+# it would almost certainly time out and burn one of the file's two attempts for nothing.
+_MIN_LOOKUP_S = 1.0
 MAX_ATTEMPTS = 2            # an erroring lookup is retried once on a later read/edit
 _PENDING_STALE_S = 60.0
 _STATE_MAX_AGE_S = 7 * 86_400
@@ -244,8 +249,13 @@ def _is_empty(answer: str) -> bool:
     return answer.strip().lower() in recall._SERVER_SENTINELS
 
 
-def fetch(path: str, cwd: str, session_id: str | None) -> str | None:
-    """One file's history text, ``""`` when there is none. Raises on transport/auth failure."""
+def fetch(path: str, cwd: str, session_id: str | None,
+          timeout: float | None = None) -> str | None:
+    """One file's history text, ``""`` when there is none. Raises on transport/auth failure.
+
+    ``timeout`` is the time this single lookup may take; :func:`deliver` passes what is left of the
+    call's shared budget so the files of one read/edit cannot add up past it. Omitted (direct
+    callers): the full configured timeout."""
     scope = recall._query_scope(cwd, session_id)
     if scope is None:
         return ""
@@ -254,7 +264,8 @@ def fetch(path: str, cwd: str, session_id: str | None) -> str | None:
     url, token = capture._resolve_becos()
     result = gbrain_client.call_tool(
         url, token, "vonic_query", {"prompt": f"(history of {path})", "metadata": scope},
-        timeout_s(), extra_headers=capture._becos_identity_headers(),
+        timeout_s() if timeout is None else timeout,
+        extra_headers=capture._becos_identity_headers(),
     )
     receipt = gbrain_client.result_receipt(result, "vonic_query")
     if recall._receipt_auth(receipt):
@@ -328,11 +339,14 @@ def deliver(mode: str, raw_paths, cwd: str, session_id: str | None, *,
     shown: list[str] = []
     outcomes: dict[str, str] = {}
     for path in claimed:
-        if time.monotonic() >= deadline:
+        remaining = deadline - time.monotonic()
+        if remaining < _MIN_LOOKUP_S:
             break                              # unclaimed files are retried on a later tool call
         started = time.monotonic()
         try:
-            text = fetch(path, cwd, session_id)
+            # Only what is left of the call's budget: the deadline is a real cap on the whole
+            # read/edit, not merely a gate checked between lookups.
+            text = fetch(path, cwd, session_id, remaining)
         except Exception as exc:  # noqa: BLE001 — fail open, never block a tool on our failure
             outcomes[path] = "error"
             _log(f"{mode:<5} error  {path}  {type(exc).__name__}: {str(exc)[:160]}")
