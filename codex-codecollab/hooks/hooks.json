@@ -3,7 +3,7 @@
   "hooks": {
     "SessionStart": [
       {
-        "matcher": "startup|resume|clear",
+        "matcher": "startup|resume|clear|fork",
         "hooks": [
           {
             "type": "command",
@@ -69,6 +69,16 @@
             "statusMessage": "codecollab: checking file history"
           }
         ]
+      },
+      {
+        "matcher": "^spawn_agent$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -lc 'set -a; [ -f \"$HOME/.codex/codecollab.env\" ] && . \"$HOME/.codex/codecollab.env\" >/dev/null 2>&1; set +a; export VONIC_CODECOLLAB_CLIENT_TAG=cx; exec python3 \"${PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/deliver/subagent_recall.py\" stash'",
+            "timeout": 5
+          }
+        ]
       }
     ],
     "Stop": [
@@ -94,6 +104,31 @@
             "type": "command",
             "command": "bash -lc 'set -a; [ -f \"$HOME/.codex/codecollab.env\" ] && . \"$HOME/.codex/codecollab.env\" >/dev/null 2>&1; set +a; export VONIC_CODECOLLAB_CLIENT_TAG=cx; exec python3 \"${PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/deliver/handoff.py\" session-end'",
             "timeout": 3
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -lc 'set -a; [ -f \"$HOME/.codex/codecollab.env\" ] && . \"$HOME/.codex/codecollab.env\" >/dev/null 2>&1; set +a; export VONIC_CODECOLLAB_CLIENT_TAG=cx; exec python3 \"${PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/deliver/subagent_recall.py\" start'",
+            "timeout": 30,
+            "additionalContextLimit": 0,
+            "statusMessage": "codecollab: recalling memory for the subagent"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "vonic_resolve_event$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -lc 'set -a; [ -f \"$HOME/.codex/codecollab.env\" ] && . \"$HOME/.codex/codecollab.env\" >/dev/null 2>&1; set +a; export VONIC_CODECOLLAB_CLIENT_TAG=cx; exec python3 \"${PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/deliver/resolve_audit.py\" post-tool-use'",
+            "timeout": 5
           }
         ]
       }

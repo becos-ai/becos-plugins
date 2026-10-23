@@ -521,6 +521,25 @@ def ask_instructions(cwd: str, session_id: object) -> str:
     """Session-start context telling the model to ask the user which project this is."""
     script = os.path.abspath(__file__)
     base = f'python3 "{script}" --cwd "{cwd}" --session "{session_id}"'
+    if _client_tag() in ("cc", "cx"):
+        # These runtimes bundle CodeCollab's tool server (codecollab_mcp.py); the script stays the
+        # fallback for a session where it is not running.
+        return "\n".join([
+            "## CodeCollab project",
+            "This folder has no CodeCollab project yet. Before working on the user's first request, "
+            "ask which project this conversation is for, then record the answer:",
+            "1. Call `codecollab_project` for the choices (their projects in this folder first, then "
+            "the team's) and a suggested name for a new project.",
+            "2. Ask the user with your question tool when you have one (a few likely projects plus "
+            "\"New project: <suggested name>\"; free text accepts any other name), else as a short "
+            "numbered list.",
+            "3. Call `codecollab_project_use` with `name` for an existing project, or `new: true` (name "
+            "optional) for a new one; the user approves recording it.",
+            f"If those tools are unavailable, run `{base} list` and `{base} use <name>` / "
+            f"`{base} use --new [<name>]` instead.",
+            "Then continue with the request. If the user ignores the question, carry on; CodeCollab "
+            "names a new project itself and tells them.",
+        ])
     return "\n".join([
         "## CodeCollab project",
         "This folder has no CodeCollab project yet. Before working on the user's first request, "

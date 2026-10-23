@@ -98,7 +98,7 @@ def _parse_rollout(path: str) -> dict | None:
     the raw ``response_item`` stream — that is the whole privacy boundary. A caller reads ``None`` as
     "skip this file, do not ingest".
     """
-    session_id = cwd = branch = commit = None
+    session_id = cwd = branch = commit = forked_from = None
     turns: list[dict] = []
     pending_user: str | None = None
     pending_user_ts: str | None = None
@@ -123,6 +123,9 @@ def _parse_rollout(path: str) -> dict | None:
                 if kind == "session_meta":
                     session_id = session_id or payload.get("session_id") or payload.get("id")
                     cwd = cwd or payload.get("cwd")
+                    # A forked thread names its parent; its inherited turns are the parent's.
+                    parent = payload.get("forked_from_id")
+                    forked_from = forked_from or (parent if isinstance(parent, str) and parent else None)
                     git = payload.get("git")
                     if isinstance(git, dict):
                         branch = branch or git.get("branch")
@@ -162,7 +165,7 @@ def _parse_rollout(path: str) -> dict | None:
         return None  # unrecognised format → fail-closed skip
     return {"session_id": session_id, "cwd": cwd or "", "branch": branch, "commit": commit,
             "client_tag": os.environ.get("VONIC_CODECOLLAB_CLIENT_TAG", "cx"), "turns": turns,
-            "path": path}
+            "path": path, **({"forked_from": forked_from} if forked_from else {})}
 
 
 def _project_for(cwd: str) -> str:
@@ -205,10 +208,11 @@ def discover() -> list[dict]:
         # scratch dir under ~/Documents/Codex/…) so the dry run's counts match what will land.
         session = {"session_id": sid, "cwd": first["cwd"], "branch": first["branch"],
                    "commit": first["commit"], "client_tag": first["client_tag"], "turns": merged}
+        fork_of = next((part["forked_from"] for part in parts if part.get("forked_from")), None)
         rows.append({"project": _project_for(first["cwd"]), "session": sid, "path": first["path"],
                      "turns": len(turns), "cwd": first["cwd"], "skipped": False,
                      "scoped": capture._is_git(first["cwd"]), "files": len(parts),
-                     "_session": session})
+                     "_session": session, **({"fork_of": fork_of} if fork_of else {})})
     return rows + skipped_rows
 
 
@@ -463,7 +467,20 @@ def main() -> int:
         rows = [r for r in rows
                 if r["session"] in sess_filter or any(r["session"].startswith(s) for s in sess_filter)]
 
+    # Forks never backfill (DECISIONS.md 2026-10-23): their inherited turns are the parent's; the
+    # fork's own live turns plus its lineage fact replace any replay.
+    forks = [r for r in rows if r.get("fork_of")]
+    rows = [r for r in rows if not r.get("fork_of")]
+    if forks and sess_filter and not rows:
+        for r in forks:
+            print(f"refused: {r['session']} is a fork of {r['fork_of']} — forked sessions are never backfilled")
+        return 2
+
     by = _print_breakdown(rows)
+    if forks:
+        print(f"\nskipped {len(forks)} forked session(s) — never backfilled:")
+        for r in forks:
+            print(f"    {r['session']:<46} fork of {r['fork_of']}")
 
     unscoped = [r for r in rows if not r.get("scoped") and not r.get("skipped")]
     unrecognized = [r for r in rows if r.get("skipped")]

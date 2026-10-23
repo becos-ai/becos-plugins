@@ -271,6 +271,40 @@ def _auto_project_notice(cwd: str, session_id: str, turns: int, *, final: bool) 
         return None
 
 
+def _record_fork(payload: dict, session_id: str, cwd: str) -> None:
+    """SessionStart ``source: "fork"``: record the fork once as a lineage fact naming its parent.
+
+    The forked thread's inherited turns never fire this plugin's hooks, so live capture already
+    records only its own new turns; the fact links it to the parent instead of copying the parent's
+    history (the policy OpenCode and Claude Code follow). The parent is the rollout's
+    ``session_meta.forked_from_id``; without one, nothing is recorded. Delivery is detached."""
+    if payload.get("source") != "fork":
+        return
+    parent = None
+    try:
+        with open(payload.get("transcript_path") or "", encoding="utf-8") as fh:
+            for line in fh:
+                rec = json.loads(line)
+                if rec.get("type") == "session_meta" and isinstance(rec.get("payload"), dict):
+                    parent = rec["payload"].get("forked_from_id")
+                    break
+    except (OSError, ValueError):
+        return
+    if not isinstance(parent, str) or not parent:
+        return
+    try:
+        sys.path.insert(0, str(DELIVER.parent))
+        import lifecycle  # noqa: PLC0415 — the vendored core
+        result = lifecycle.append({"client_tag": CLIENT_TAG, "session_id": session_id, "cwd": cwd,
+                                   "source_event_id": f"fork:{parent}", "occurred_at": _iso_now(),
+                                   "type": "fork", "parent_session_id": parent}, send=False)
+    except Exception as exc:  # noqa: BLE001 — a lineage fact must never block Codex
+        _debug(f"fork fact skipped: {exc}")
+        return
+    if result.get("appended"):
+        _spawn_detached([sys.executable, str(DELIVER.parent / "lifecycle.py"), "retry", f"--cwd={cwd}"])
+
+
 def _sweep() -> None:
     """SessionStart: let the vendored core retry any undelivered buffers (detached)."""
     _spawn_detached([sys.executable, str(DELIVER), "sweep"])
@@ -342,6 +376,7 @@ def main() -> int:
     cwd = payload.get("cwd") or os.getcwd()
 
     if event == "SessionStart":
+        _record_fork(payload, session_id, cwd)
         _sweep()
         _ensure_backfill_skill()   # one-step install of the /backfill skill (idempotent, fail-open)
         _refresh_inbox()

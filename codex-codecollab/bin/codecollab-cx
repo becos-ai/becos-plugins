@@ -149,7 +149,10 @@ def login_complete(code: str) -> int:
     print("\nAuth is ready. Enable + trust the hooks, then restart Codex:\n"
           "  1. codex features enable hooks\n"
           "  2. Restart Codex (or start a new task) and TRUST the codecollab hooks when prompted.\n"
-          "  3. Ask a question; check ~/.cache/codecollab/cx-plugin.log and for a -cx- page in becos.")
+          "  3. Ask a question; check ~/.cache/codecollab/cx-plugin.log and for a -cx- page in becos.\n"
+          "Recommended: `codecollab-cx approvals` lets CodeCollab's read tools (recall, status, inbox)\n"
+          "run without a prompt and makes Codex ask before every mutating one (send, accept, decline,\n"
+          "download, claim, re-file, deliver a backfill). It edits ~/.codex/config.toml; --remove undoes it.")
     return 0
 
 
@@ -219,6 +222,65 @@ def login_start(gateway: str, becos_url_arg: str | None, author_arg: str | None,
     return 0
 
 
+# ── approval policy for the mutating CodeCollab tools ──────────────────────────────────────────
+#
+# Codex hooks cannot require a prompt (a PreToolUse "ask" is logged as unsupported and the tool runs),
+# but Codex's own per-tool MCP approval can. This writes `approval_mode = "prompt"` for every
+# mutating CodeCollab tool into the user's config.toml, inside one marked block that `--remove`
+# takes out again. Run only when the user asks (the in-chat skill asks first), never silently.
+CONFIG = CODEX_HOME / "config.toml"
+_BEGIN = "# >>> codecollab approvals (managed by codecollab-cx; remove with `codecollab-cx approvals --remove`) >>>"
+_END = "# <<< codecollab approvals <<<"
+
+
+def _plugin_key(text: str) -> str:
+    """This plugin's config key, `codex-codecollab@<marketplace>`, as Codex recorded it."""
+    import re  # noqa: PLC0415
+    found = re.search(r'^\[plugins\."(codex-codecollab@[^"]+)"\]', text, re.M)
+    return found.group(1) if found else "codex-codecollab@becos"
+
+
+def approvals_block(text: str) -> str:
+    sys.path.insert(0, str(DELIVER))
+    import tool_specs  # noqa: PLC0415 — the vendored list of mutating tools
+    key = _plugin_key(text)
+    # Codex asks before EVERY plugin MCP tool by default (live-verified, 0.162.1), which would put a
+    # prompt on each recall. Read and draft tools are approved; each mutating tool asks.
+    lines = [_BEGIN, f'[plugins."{key}".mcp_servers.codecollab]', 'default_tools_approval_mode = "approve"']
+    for tool in tool_specs.MUTATING:
+        lines += [f'[plugins."{key}".mcp_servers.codecollab.tools.{tool}]', 'approval_mode = "prompt"']
+    return "\n".join(lines + [_END]) + "\n"
+
+
+def _without_block(text: str) -> str:
+    if _BEGIN not in text:
+        return text
+    head, _, rest = text.partition(_BEGIN)
+    _, _, tail = rest.partition(_END)
+    return head.rstrip("\n") + ("\n" if head.strip() else "") + tail.lstrip("\n")
+
+
+def run_approvals(remove: bool) -> int:
+    try:
+        text = CONFIG.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        text = ""
+    base = _without_block(text)
+    new = base if remove else base.rstrip("\n") + ("\n\n" if base.strip() else "") + approvals_block(base)
+    if new != text:
+        CONFIG.parent.mkdir(parents=True, exist_ok=True)
+        tmp = CONFIG.with_suffix(".toml.codecollab-tmp")
+        tmp.write_text(new, encoding="utf-8")
+        tmp.replace(CONFIG)
+    if remove:
+        print("Removed CodeCollab's approval settings; its mutating tools follow your normal approval policy.")
+    else:
+        print("CodeCollab's read tools now run without a prompt, and Codex asks before every mutating "
+              "one (send, accept, decline, download, claim a handle, re-file the project, deliver a "
+              "backfill). Restart Codex to apply.")
+    return 0
+
+
 def main() -> int:
     # Handle `backfill` BEFORE argparse so its flags (--deliver/--async/--project/…) forward verbatim
     # to the core; argparse's REMAINDER intercepts leading `--` options, which we don't want here.
@@ -241,7 +303,12 @@ def main() -> int:
     sub.add_parser("backfill", help="sweep pre-existing Codex sessions into memory "
                    "(dry-run by default; pass --deliver [--async] to ship; also --project/--session/"
                    "--watch/--campaign)")
+    ap_approvals = sub.add_parser("approvals", help="make Codex ask before every mutating CodeCollab "
+                                  "tool (writes approval_mode=prompt to config.toml; --remove undoes it)")
+    ap_approvals.add_argument("--remove", action="store_true")
     args = ap.parse_args()
+    if args.cmd == "approvals":
+        return run_approvals(args.remove)
     if args.cmd != "login":
         ap.print_help()
         return 0
