@@ -162,6 +162,17 @@ _CALL_TYPES = {"function_call", "custom_tool_call", "local_shell_call", "exec_co
                "mcp_tool_call_begin"}
 
 
+def _session_source(records: list[dict]) -> str:
+    """How Codex was started, from the rollout's ``session_meta``: ``exec`` for ``codex exec`` (a
+    program running Codex), ``cli`` / ``vscode`` interactively. Empty when the line isn't here."""
+    for rec in records:
+        payload = rec.get("payload")
+        if rec.get("type") == "session_meta" and isinstance(payload, dict):
+            source = payload.get("source")
+            return source[:64] if isinstance(source, str) else ""
+    return ""
+
+
 def _ran_team_activity(records: list[dict]) -> bool:
     """Whether one of this turn's tool calls ran team activity. Only the yes/no leaves the machine;
     the command text is read here and never sent."""
@@ -238,6 +249,9 @@ def _turn_activity(payload: dict, state: dict,
         state["rollout_offset"] = 0
     records, new_offset = _read_rollout(transcript, state.get("rollout_offset", 0))
     state["rollout_offset"] = new_offset
+    source = _session_source(records)   # the first read of a rollout carries its session_meta
+    if source:
+        state["source"] = source
     ops = _ops_from(records)
     paths = [op["path"] for op in ops]
     return paths, _repo_activity(paths, state.get("cwd", cwd)), ops, _ran_team_activity(records)
@@ -354,6 +368,10 @@ def main() -> int:
                     "user": user, "assistant": assistant, "files": files}
             if team_activity:
                 turn["team_activity"] = True   # the core marks capture_context (TODOS #18)
+            if state.get("source"):
+                # A headless start (`codex exec`) is a hint the core weighs when it labels who
+                # sent the prompt (TODOS #92).
+                turn["entrypoint"] = state["source"]
             _persist_turn(session_id, state.get("cwd", cwd), file_ops)
             if file_ops:
                 # The vendored core builds `changed_files` from `file_ops` (resolved to repo-relative

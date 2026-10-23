@@ -61,11 +61,29 @@ def _with_notice(raw: str) -> str:
     return json.dumps(out)
 
 
+def _recall_env(stdin: str) -> dict:
+    """The environment for recall.py: how this session was started (``exec`` for ``codex exec``,
+    learnt by the capture hook from the rollout), so a headless job's heartbeat-style prompt gets no
+    recall (TODOS #92). Unknown until the session's first turn is captured."""
+    env = dict(os.environ)
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import codex_capture  # noqa: PLC0415 — the capture hook's per-session state
+        session_id = str(json.loads(stdin).get("session_id") or "")
+        source = codex_capture._load_pending(session_id).get("source") if session_id else ""
+        if isinstance(source, str) and source:
+            env["VONIC_CODECOLLAB_ENTRYPOINT"] = source
+    except Exception:  # noqa: BLE001 — never block the prompt
+        pass
+    return env
+
+
 def main() -> int:
     stdin = sys.stdin.read()
     try:
         done = subprocess.run([sys.executable, str(RECALL)], input=stdin,  # noqa: S603
-                              capture_output=True, text=True, check=False)
+                              capture_output=True, text=True, check=False,
+                              env=_recall_env(stdin))
     except Exception:  # noqa: BLE001 — never block the prompt
         return 0
     raw = done.stdout

@@ -619,6 +619,15 @@ def main() -> int:
     prompt = _strip_handoff(prompt)
     if not prompt:  # a handoff with no question after it: nothing to search on
         return _flush()
+    # A program's prompt (a heartbeat, a background-task notice, a declared automation) is not the
+    # person asking, so nothing is recalled for it (TODOS #92). The hook sees no per-message origin;
+    # Claude Code passes how it was started in the environment, and a port its own (Codex: `exec`).
+    entrypoint = (os.environ.get("CLAUDE_CODE_ENTRYPOINT")
+                  or os.environ.get("VONIC_CODECOLLAB_ENTRYPOINT"))
+    sender = capture.prompt_sender(prompt, entrypoint=entrypoint)
+    if sender["kind"] != "person":
+        _log(f"no-inject  sender={sender['kind']} signal={sender['signal']}")
+        return _flush()
     cwd = payload.get("cwd") or os.getcwd()   # scopes recall to the checkout being worked in
     scope = _query_scope(
         cwd, payload.get("session_id"), payload.get("caller_agent")
