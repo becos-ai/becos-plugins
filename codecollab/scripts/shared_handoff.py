@@ -216,6 +216,19 @@ def _bounded_text(value: object, limit: int) -> str:
     return " ".join(text.split())[:limit]
 
 
+def _sender_label(row: dict) -> str:
+    """``Name (@handle)`` from the server's ``created_by`` (snapshotted from the verified identity
+    at send); empty for a package from before the server stored it."""
+    sender = row.get("created_by")
+    if not isinstance(sender, dict):
+        return ""
+    name = _bounded_text(sender.get("display_name") or "", 80)
+    handle = _bounded_text(sender.get("handle") or "", 64)
+    if name and handle:
+        return f"{name} (@{handle})"
+    return name or (f"@{handle}" if handle else "")
+
+
 def _safe_line(value: dict) -> str:
     """One JSON-escaped line; markup characters cannot close or open a context block."""
     rendered = json.dumps(value, ensure_ascii=True, separators=(",", ":"))
@@ -1087,6 +1100,9 @@ def notification() -> str:
         safe = {"handoff_id": str(row.get("handoff_id") or "")[:128],
                 "addressed_handle": str(row.get("addressed_handle") or "")[:64],
                 "summary": str(row.get("summary") or "")[:240]}
+        sender = _sender_label(row)
+        if sender:
+            safe["from"] = sender
         lines.append("- " + _safe_line(safe))
     lines.append(f"Use {inbox_reference()} to inspect or accept them.")
     lines.append("</shared-handoff-notice>")
