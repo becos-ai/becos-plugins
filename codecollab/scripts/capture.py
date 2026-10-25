@@ -1638,9 +1638,10 @@ def _turn_content(turn: dict) -> str:
 
 
 def _dialogue_on() -> bool:
-    """Send turns as ``{"dialogue": [...]}`` (PLAN_speaker_split.md). Default OFF until every
-    server it can reach accepts the envelope (vonic_agent renders it into ``content``)."""
-    return _flag("VONIC_CODECOLLAB_DIALOGUE")
+    """Send turns as ``{"dialogue": [...]}`` (PLAN_speaker_split.md). Default ON since 0.42.0
+    (vonic_agent renders it into ``content``); ``VONIC_CODECOLLAB_DIALOGUE=0`` sends the legacy
+    string/envelope, for a server older than vonic_agent ``06e8348``."""
+    return _flag_default_on("VONIC_CODECOLLAB_DIALOGUE")
 
 
 def _content_shape(content) -> str:
