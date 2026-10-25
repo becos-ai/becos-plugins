@@ -1599,14 +1599,55 @@ def _event_type(turn: dict) -> tuple[str, str | None]:
     return ("code_change" if turn.get("files") else "code_explanation"), None
 
 
+_USER_SHARE = 0.30   # of the side budget, guaranteed to the user's prompt in an over-length turn
+_CONTENT_SHAPES = ("string", "envelope", "dialogue")
+
+
+def _turn_sides(turn: dict) -> tuple[str, str]:
+    """``(user, assistant)`` of one turn, each fitted to a per-side budget so ``_turn_content``
+    never exceeds ``_MAX_EVENT_CONTENT``.
+
+    Under the cap both sides pass through unchanged. Over it, the user's prompt keeps up to 30 % of
+    the budget — more when the reply does not need its share — and the reply gets the rest, each cut
+    at its end. The old rule, one tail cut of the rendered string, always removed the reply first:
+    a huge prompt left none of it."""
+    user = turn.get("user") or ""
+    assistant = turn.get("assistant") or ""
+    # The labels and separator `_turn_content` adds around the sides that are present.
+    overhead = ((len("**User:** ") if user else 0) + (len("**Assistant:** ") if assistant else 0)
+                + (len("\n\n") if user and assistant else 0))
+    if len(user) + len(assistant) + overhead <= _MAX_EVENT_CONTENT:
+        return user, assistant
+    budget = _MAX_EVENT_CONTENT - overhead
+    user_budget = min(len(user), max(int(budget * _USER_SHARE), budget - len(assistant)))
+    return user[:user_budget], assistant[:budget - user_budget]
+
+
 def _turn_content(turn: dict) -> str:
-    """One turn as prose — the event's ``content`` text. Already sanitised by ``_record_turns``."""
+    """One turn as prose — the event's ``content`` text. Already sanitised by ``_record_turns``.
+
+    vonic_agent's ``render_dialogue`` must produce exactly this string from the ``dialogue``
+    envelope; ``testdata/dialogue_render_golden.json`` (a byte copy of vonic_agent's) pins it."""
+    user, assistant = _turn_sides(turn)
     parts = []
-    if turn.get("user"):
-        parts.append(f"**User:** {turn['user']}")
-    if turn.get("assistant"):
-        parts.append(f"**Assistant:** {turn['assistant']}")
+    if user:
+        parts.append(f"**User:** {user}")
+    if assistant:
+        parts.append(f"**Assistant:** {assistant}")
     return "\n\n".join(parts).strip()[:_MAX_EVENT_CONTENT]
+
+
+def _dialogue_on() -> bool:
+    """Send turns as ``{"dialogue": [...]}`` (PLAN_speaker_split.md). Default OFF until every
+    server it can reach accepts the envelope (vonic_agent renders it into ``content``)."""
+    return _flag("VONIC_CODECOLLAB_DIALOGUE")
+
+
+def _content_shape(content) -> str:
+    """The wire shape of an ``_event_content`` result, recorded on the turn as ``content_shape``."""
+    if isinstance(content, str):
+        return "string"
+    return "dialogue" if "dialogue" in content else "envelope"
 
 
 def _event_content(turn: dict):
@@ -1619,15 +1660,30 @@ def _event_content(turn: dict):
     structured object ``{text_content, reasoning?, code_changes?}`` (Amitoj's shape): the prose
     stays in ``text_content`` — the only field the ingestion agent synthesises — while thinking and
     code ride along as sibling fields, stored verbatim and never fed to the LLM. Returns ``None``
-    when there is no prose after sanitising (the turn is dropped, as before)."""
+    when there is no prose after sanitising (the turn is dropped, as before).
+
+    With ``VONIC_CODECOLLAB_DIALOGUE`` on, EVERY turn is ``{dialogue, reasoning?, code_changes?}``:
+    one item per non-empty side, the same per-side-budgeted text ``_turn_content`` renders, so the
+    server's rendering equals the legacy string. A turn that already has a ``content_shape`` (set
+    by ``_build_events`` at its first delivery attempt) keeps it whatever the flag says now, so a
+    flag flip between retries never re-sends a turn in a different shape."""
     text = _turn_content(turn)
     if not text:
         return None
     reasoning = turn.get("thinking") or ""
     code = turn.get("code") or []
-    if not reasoning and not code:
+    shape = turn.get("content_shape")
+    if shape not in _CONTENT_SHAPES:
+        shape = "dialogue" if _dialogue_on() else None
+    if shape == "dialogue":
+        user, assistant = _turn_sides(turn)
+        content = {"dialogue": [{"role": role, "text": side}
+                                for role, side in (("user", user), ("assistant", assistant))
+                                if side]}
+    elif not reasoning and not code:
         return text
-    content = {"text_content": text}
+    else:
+        content = {"text_content": text}
     if reasoning:
         content["reasoning"] = reasoning
     if code:
@@ -2638,6 +2694,8 @@ def _build_events(buf: dict) -> list[dict]:
         if content is None:
             t["uploaded"] = True   # nothing left after sanitising
             continue
+        # Sticky from the first attempt: a retry re-sends the shape the server may already hold.
+        t.setdefault("content_shape", _content_shape(content))
         seq = t.get("seq", 0)
         # A turn carries its OWN scope snapshot (`git`). Only turns recorded before per-turn scope
         # (no `git` key at all) fall back to the session work tree — a turn WITH a snapshot is
@@ -2654,7 +2712,9 @@ def _build_events(buf: dict) -> list[dict]:
             _log_delivery(session_id, seq, "turn", "", "dropped: no repository scope")
             continue
         args = {
-            "content": content,   # str by default; {text_content, reasoning?, code_changes?} when enriched
+            # str by default; {text_content, reasoning?, code_changes?} when enriched;
+            # {dialogue, reasoning?, code_changes?} with VONIC_CODECOLLAB_DIALOGUE
+            "content": content,
             "mode": "fact",
             "metadata": _remember_metadata(buf, t, git["repo"], git["branch"], git["author"],
                                            git.get("commit")),
@@ -2921,8 +2981,9 @@ def _merge_marks(buffer_path: str, mem_buf: dict) -> None:
     the buffer lock: the lock is taken only for these millisecond read-modify-writes, so a Stop
     hook's ``_record_turns`` never waits behind an in-flight — or backed-up — delivery. Because
     ``_record_turns`` only ever appends turns and never touches an existing turn's
-    ``uploaded``/``attempts``, copying just those two fields by ``seq`` is a lossless merge in both
-    directions (record's appends survive; deliver's marks survive).
+    ``uploaded``/``attempts``, copying just those fields by ``seq`` is a lossless merge in both
+    directions (record's appends survive; deliver's marks survive). ``content_shape`` is copied
+    too, first write wins, so a retry after a flag flip re-sends the shape first attempted.
     """
     with _locked(buffer_path):
         disk = _load_buffer(buffer_path)
@@ -2937,6 +2998,8 @@ def _merge_marks(buffer_path: str, mem_buf: dict) -> None:
                 d["uploaded"] = True
             if t.get("attempts"):
                 d["attempts"] = max(d.get("attempts", 0), t.get("attempts", 0))
+            if t.get("content_shape"):
+                d.setdefault("content_shape", t["content_shape"])
         _save_buffer(buffer_path, disk)
 
 

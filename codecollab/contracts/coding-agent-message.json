@@ -57,6 +57,7 @@
     "sessionId": "Becomes the server's conversation key. Absent, the server derives a stable id from (tenant, user, repository, branch), collapsing every turn into one conversation.",
     "turnIndex": "Rendered into the message's text prefix only; no structural effect.",
     "repositories_touched": "NOT a key here, deliberately. The per-turn repository report (0.17.0) ships only on the becos transport, inside metadata.event.metadata — a free-form bag, so it breaks no strict model. This REST payload has no free-form field, so carrying it would need a gateway change first. Same reasoning that removed repositoriesTouched in 0.12.0.",
-    "Idempotency-Key": "Sent as a HEADER, not a body key. Must be a UUID; required for 'remember'."
+    "Idempotency-Key": "Sent as a HEADER, not a body key. Must be a UUID; required for 'remember'.",
+    "dialogue": "NOT a key here: this REST payload is already one message per speaker (role + text). The becos transport's vonic_remember content, with VONIC_CODECOLLAB_DIALOGUE on, is {\"dialogue\": [{\"role\": \"user\"|\"assistant\", \"text\": \"...\"}], \"reasoning\"?, \"code_changes\"?} (only non-empty sides, no text_content); flag off it stays a bare string or {text_content, reasoning?, code_changes?}. vonic_agent renders the dialogue into content byte-identically to capture.py _turn_content (shared golden: scripts/testdata/dialogue_render_golden.json) and must be deployed first: its strict models reject an unknown content shape."
   }
 }

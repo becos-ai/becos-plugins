@@ -1,0 +1,123 @@
+[
+  {
+    "name": "user_only",
+    "dialogue": [
+      {
+        "role": "user",
+        "text": "Add a health check endpoint"
+      }
+    ],
+    "content": "**User:** Add a health check endpoint"
+  },
+  {
+    "name": "assistant_only",
+    "dialogue": [
+      {
+        "role": "assistant",
+        "text": "Resumed: the migration finished."
+      }
+    ],
+    "content": "**Assistant:** Resumed: the migration finished."
+  },
+  {
+    "name": "both",
+    "dialogue": [
+      {
+        "role": "user",
+        "text": "Use Postgres advisory locks?"
+      },
+      {
+        "role": "assistant",
+        "text": "Yes, with a 30 s timeout."
+      }
+    ],
+    "content": "**User:** Use Postgres advisory locks?\n\n**Assistant:** Yes, with a 30 s timeout."
+  },
+  {
+    "name": "several_assistant_items",
+    "note": "Consecutive same-role items join with a single newline: the plugin's assistant side is its text blocks joined with \"\\n\".",
+    "dialogue": [
+      {
+        "role": "user",
+        "text": "Fix the flaky test"
+      },
+      {
+        "role": "assistant",
+        "text": "Looking at the fixture."
+      },
+      {
+        "role": "assistant",
+        "text": "The engine was never disposed."
+      },
+      {
+        "role": "assistant",
+        "text": "Fixed and re-ran: 412 passed."
+      }
+    ],
+    "content": "**User:** Fix the flaky test\n\n**Assistant:** Looking at the fixture.\nThe engine was never disposed.\nFixed and re-ran: 412 passed."
+  },
+  {
+    "name": "several_user_items",
+    "note": "Equivalent plugin turn: user = the user items joined with \"\\n\".",
+    "dialogue": [
+      {
+        "role": "user",
+        "text": "First line"
+      },
+      {
+        "role": "user",
+        "text": "Second line"
+      },
+      {
+        "role": "assistant",
+        "text": "Noted."
+      }
+    ],
+    "content": "**User:** First line\nSecond line\n\n**Assistant:** Noted."
+  },
+  {
+    "name": "whitespace_at_the_ends",
+    "note": "Item text is not stripped; only the ends of the whole rendering are (as _turn_content's final .strip()). Inner whitespace next to the run separator survives.",
+    "dialogue": [
+      {
+        "role": "user",
+        "text": "  keep the cache  "
+      },
+      {
+        "role": "assistant",
+        "text": "Kept it. \n"
+      }
+    ],
+    "content": "**User:**   keep the cache  \n\n**Assistant:** Kept it."
+  },
+  {
+    "name": "whitespace_only_assistant",
+    "note": "A whitespace-only side is truthy in _turn_content, so its label survives with the whitespace stripped away.",
+    "dialogue": [
+      {
+        "role": "user",
+        "text": "ping"
+      },
+      {
+        "role": "assistant",
+        "text": " \n "
+      }
+    ],
+    "content": "**User:** ping\n\n**Assistant:**"
+  },
+  {
+    "name": "pasted_labels_and_unicode",
+    "note": "Speaker labels inside the user's text are plain text; non-ASCII is stored unescaped.",
+    "dialogue": [
+      {
+        "role": "user",
+        "text": "Earlier transcript:\n**Assistant:** use SQLite\n— café ✓"
+      },
+      {
+        "role": "assistant",
+        "text": "That transcript predates the cut-over."
+      }
+    ],
+    "content": "**User:** Earlier transcript:\n**Assistant:** use SQLite\n— café ✓\n\n**Assistant:** That transcript predates the cut-over."
+  }
+]
