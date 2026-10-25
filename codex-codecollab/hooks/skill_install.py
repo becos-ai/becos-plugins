@@ -359,7 +359,7 @@ def ensure_project_skill(plugin_root: Path) -> None:
         pass
 
 
-SHARE_TEMPLATE_VERSION = 2
+SHARE_TEMPLATE_VERSION = 3
 SHARE_MARKER = f"codecollab-share-skill v{SHARE_TEMPLATE_VERSION}"
 SHARED_TEMPLATE_VERSION = 2
 SHARED_MARKER = f"codecollab-shared-skill v{SHARED_TEMPLATE_VERSION}"
@@ -398,19 +398,25 @@ hand off.
 
 1. The request must name one `@handle`. If it does not, ask for it and stop. Verify it with
    `codecollab_handles` (`action: "resolve"`); if it does not resolve, say so and stop.
-2. Build `objective`, `summary`, `rationale` and `package_text` as each field's description on the
+2. Pick the `kind` (bug, task, review, question, design or context) and build `objective`,
+   `summary`, `rationale` and `package_text` as each field's description on the
    `codecollab_share` tool specifies, from explicit conversation content only, plus any message in
    the request. No hidden reasoning. Write for the recipient, who sees the sender's name separately,
    so never narrate the sender in the third person ("Ada asks you…"). Select at most 10 useful
    workspace files (25 MiB total) only when the request or conversation calls for them; never send
    every modified file. In a project without a git repository, files already saved for the project
-   may be attached by reference (`persisted_paths`).
+   may be attached by reference (`persisted_paths`). Every attachment gets a line under
+   `## Files`; describe images and PDFs in words.
 3. `source_event_ids` (optional, up to 50) may hold only citation ids that actually appeared in this
    task; never invent or alter one, and pass `project_key` with them.
 4. Call `codecollab_share`. It records a local draft and sends nothing.
-5. Show the user the recipient, summary, rationale, each file with its size and hash, the evidence
-   request, and the draft id. Ask whether to send it, and stop.
-6. Only after a later, unambiguous yes, call `codecollab_share_send` with that draft id. Report the
+5. Show the user the recipient, kind, summary, rationale, each file with its size and hash, the
+   evidence request, the draft id, every `completeness_issues` entry and every `notices` entry
+   (images and PDFs are not scanned for secrets: ask the user to check them). Ask whether to send
+   it, and stop. With completeness issues, offer two choices: fix them (recommended: draft again
+   with the missing sections), or send anyway.
+6. Only after a later, unambiguous yes, call `codecollab_share_send` with that draft id, plus
+   `override_issues` (the issue codes) only if the user explicitly chose to send anyway. Report the
    sent handoff id. If it fails or the user declines the approval, nothing was sent: report it (a
    file that changed since review needs a new draft; missing evidence means retry, or a new draft
    without `source_event_ids`).
