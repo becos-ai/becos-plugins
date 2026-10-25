@@ -35,6 +35,8 @@ PROJECT_FILES_TOOL = "vonic_project_files"
 # Mirrors ``project.NOCODE_PREFIX``; it is also the server contract for ``vonic_project_files``,
 # whose ``project_key`` must name a project without a git repository.
 NOCODE_PREFIX = "nocode:"
+# Mirrors vonic_agent ``completeness.HANDOFF_KINDS`` (the server validates too).
+HANDOFF_KINDS = ("bug", "task", "review", "question", "design", "context")
 MAX_FILES = 10
 MAX_BYTES = 25 * 1024 * 1024
 # Automatic per-turn persistence uses the SAME budget as an explicit share, so a turn can never
@@ -61,6 +63,8 @@ _EVIDENCE_ID_KEYS = {"cite", "citation", "citation_id", "decision_id", "event_id
 _SAFE_EXTENSIONS = {
     ".c", ".cc", ".cpp", ".css", ".csv", ".go", ".gif", ".h", ".hpp", ".html",
     ".jpeg", ".jpg", ".js", ".json", ".jsx", ".md", ".pdf", ".png", ".py", ".rs",
+    # Bug evidence (all text, so the credential scan reads them like any other source file).
+    ".diff", ".ipynb", ".java", ".kt", ".log", ".patch", ".rb", ".sh", ".sql",
     ".svg", ".toml", ".ts", ".tsx", ".txt", ".webp", ".xml", ".yaml", ".yml",
 }
 _SENSITIVE_NAMES = {".env", ".git", ".ssh", ".aws", ".gnupg", "credentials", "secrets"}
@@ -560,10 +564,12 @@ def _persisted_selection(payload: dict, cwd: str) -> list[dict]:
 
 
 def create_draft(payload: dict, *, cwd: str) -> dict:
-    required = ("addressed_handle", "objective", "summary", "rationale", "package_text")
+    required = ("addressed_handle", "kind", "objective", "summary", "rationale", "package_text")
     missing = [key for key in required if not str(payload.get(key) or "").strip()]
     if missing:
         raise SharedHandoffError("missing required fields: " + ", ".join(missing))
+    if payload["kind"] not in HANDOFF_KINDS:
+        raise SharedHandoffError("kind must be one of: " + ", ".join(HANDOFF_KINDS))
     selected = payload.get("files") or []
     if not isinstance(selected, list) or not all(isinstance(item, str) for item in selected):
         raise SharedHandoffError("files must be a list of workspace-relative paths")
@@ -611,6 +617,14 @@ def create_draft(payload: dict, *, cwd: str) -> dict:
                    if k not in {"root", "content_b64", "linkage", "mtime_ns"}} for item in files]
         + [dict(item) for item in persisted],
     }
+    issues = draft.get("completeness_issues") or []
+    if issues:
+        # The server refuses confirm until these are fixed (a new draft) or each is overridden.
+        draft["send_blocked"] = (
+            "This draft cannot be sent as it is. Show the user these issues and ask: fix them in a "
+            "new draft (recommended), or send anyway — only on their explicit choice, confirm with "
+            "override_issues: " + json.dumps([item.get("code") for item in issues
+                                              if isinstance(item, dict)]))
     if evidence_request:
         draft["evidence_request"] = {
             **evidence_request,
@@ -863,7 +877,7 @@ def _confirm_failure(exc: Exception, requested: int) -> str:
     return message
 
 
-def confirm_and_send(handoff_id: str) -> dict:
+def confirm_and_send(handoff_id: str, override_issues: list[str] | None = None) -> dict:
     path = _manifest_path(handoff_id)
     try:
         with open(path, encoding="utf-8") as handle:
@@ -879,7 +893,10 @@ def confirm_and_send(handoff_id: str) -> dict:
             raise SharedHandoffError("local draft snapshot is invalid")
     requested = len(manifest.get("source_event_ids") or [])
     try:
-        confirmed = call(HANDOFF_TOOL, {"action": "confirm", "handoff_id": handoff_id})
+        arguments = {"action": "confirm", "handoff_id": handoff_id}
+        if override_issues:
+            arguments["override_issues"] = [str(code)[:MAX_ID_CHARS] for code in override_issues][:50]
+        confirmed = call(HANDOFF_TOOL, arguments)
     except SharedHandoffError as exc:
         raise SharedHandoffError(_confirm_failure(exc, requested)) from exc
     if isinstance(confirmed, dict) and confirmed.get("status") == "sent":
@@ -1103,6 +1120,14 @@ def _print(value: object) -> None:
     print(json.dumps(value, ensure_ascii=False, indent=2, default=str))
 
 
+def _override_list(value: object) -> list[str] | None:
+    if value is None:
+        return None
+    if not isinstance(value, list) or not all(isinstance(code, str) for code in value):
+        raise SharedHandoffError("override_issues must be a list of issue codes")
+    return value
+
+
 def _json_command(payload: object, cwd: str) -> object:
     if not isinstance(payload, dict):
         raise SharedHandoffError("command input must be a JSON object")
@@ -1110,7 +1135,8 @@ def _json_command(payload: object, cwd: str) -> object:
     if command == "draft":
         return create_draft(payload.get("payload") or {}, cwd=cwd)
     if command == "confirm":
-        return confirm_and_send(str(payload.get("handoff_id") or ""))
+        return confirm_and_send(str(payload.get("handoff_id") or ""),
+                                _override_list(payload.get("override_issues")))
     if command in {"list", "get", "seen", "accept", "decline"}:
         if command == "list":
             return list_handoffs()
@@ -1168,7 +1194,12 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "command-json":
         _print(_json_command(json.load(sys.stdin), args.cwd))
     elif args.command == "confirm":
-        _print(confirm_and_send(args.value or ""))
+        # ``extra``: a JSON array of issue codes the user chose to send anyway.
+        try:
+            overrides = json.loads(args.extra) if args.extra else None
+        except ValueError as exc:
+            raise SharedHandoffError("override issues must be a JSON array of codes") from exc
+        _print(confirm_and_send(args.value or "", _override_list(overrides)))
     elif args.command == "list":
         _print(list_handoffs())
     elif args.command == "get":

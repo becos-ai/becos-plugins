@@ -14,7 +14,7 @@ Two shapes exist, by what each host lets a plugin enforce:
   exactly those (Claude Code: a PreToolUse ``ask``; Codex: ``approval_mode = "prompt"``; Cursor: its
   per-tool prompt plus the ``beforeMCPExecution`` guard). ``MUTATING`` names them.
 
-The share field guidance strings are byte-identical to the OpenCode ports' (oc-codecollab-plugin
+The share field guidance strings (``*_GUIDANCE``) are byte-identical to the OpenCode ports' (oc-codecollab-plugin
 ``src/provenance.ts``, oc-v2-codecollab-plugin ``src/v2/tools.ts``); a test in each of those repos
 compares against the vendored copy of this file.
 """
@@ -22,9 +22,23 @@ from __future__ import annotations
 
 # ── share package guidance (pinned across all five clients) ─────────────────────────────────────
 PACKAGE_TEXT_GUIDANCE = (
-    "draft: the handoff body. Cover, in order: objective; current state; decisions and tradeoffs; "
-    "rejected approaches; open questions; exact next steps. Explicit conversation content only — "
-    "no hidden reasoning."
+    "draft: the handoff body, in Markdown with ## headings. Cover, in order: objective; current "
+    "state; decisions and tradeoffs; rejected approaches; open questions; ## Next steps (exact). "
+    "Add by kind — bug: ## Steps to reproduce, ## Expected vs actual, ## Environment (branch, OS, "
+    "versions) and the commit SHA, with errors and logs quoted verbatim; task: ## Acceptance "
+    "criteria, ## Scope (with non-goals); design: ## Problem, ## Options considered, "
+    "## Recommendation; review or question: ## Ask (what answer is wanted, by when). With "
+    "attachments, a ## Files section: one line per file naming it, why it is attached and what to "
+    "look at, and for an image or PDF what it shows, in words. Attach a .patch of uncommitted "
+    "changes the recipient needs. Explicit conversation content only — no hidden reasoning."
+)
+KIND_GUIDANCE = (
+    "draft: what the package is — bug, task, review, question, design or context. It sets the "
+    "sections package_text needs; the draft lists any that are missing as completeness_issues."
+)
+OVERRIDE_ISSUES_GUIDANCE = (
+    "confirm: completeness_issues codes from the draft to send anyway. Only when the user, shown "
+    "those issues, explicitly said to send without fixing them; otherwise fix them in a new draft."
 )
 OBJECTIVE_GUIDANCE = (
     "draft: the package's title in every inbox listing and the dashboard. One line under about 100 "
@@ -73,6 +87,7 @@ def _obj(properties: dict, required: tuple = ()) -> dict:
 
 _S = {"type": "string"}
 _ID = {"type": "string", "description": "The handoff id (from codecollab_share or codecollab_shared)."}
+HANDOFF_KINDS = ("bug", "task", "review", "question", "design", "context")
 _SOURCE_REF = {"type": "object", "properties": {
     "kind": {"type": "string", "enum": ["event", "page", "url", "file", "other"]},
     "value": {"type": "string"}, "label": {"type": "string"}},
@@ -179,11 +194,14 @@ def tools(host: str = "claude", *, projects: bool = True, shared: bool = True,
              "description": (
                  "Create a reviewable CodeCollab handoff DRAFT for one teammate (@handle). It screens the "
                  "selected files and records a local draft; it uploads and sends NOTHING and needs no "
-                 "approval. Show the user the returned recipient, summary, files and draft id and ask "
-                 "whether to send; sending is codecollab_share_send, only after the user's later explicit "
-                 "yes. An incidental @mention is never a request to share."),
+                 "approval. Show the user the returned recipient, summary, files, draft id, "
+                 "completeness_issues and notices, and ask whether to send; sending is "
+                 "codecollab_share_send, only after the user's later explicit yes. Completeness issues "
+                 "block sending until a new draft fixes them or the user explicitly chooses to send "
+                 "anyway. An incidental @mention is never a request to share."),
              "inputSchema": _obj({
                  "addressed_handle": {"type": "string", "description": "draft: verified addressee handle."},
+                 "kind": {"type": "string", "enum": list(HANDOFF_KINDS), "description": KIND_GUIDANCE},
                  "objective": {"type": "string", "description": OBJECTIVE_GUIDANCE},
                  "summary": {"type": "string", "description": SUMMARY_GUIDANCE},
                  "rationale": {"type": "string", "description": RATIONALE_GUIDANCE},
@@ -203,11 +221,15 @@ def tools(host: str = "claude", *, projects: bool = True, shared: bool = True,
                  "source_event_ids": {"type": "array", "items": _S, "maxItems": 50, "description": (
                      "draft: up to 50 exact captured-interaction ids that appeared in this conversation "
                      "(never invented); the server resolves them to stored evidence.")},
-             }, ("addressed_handle", "objective", "summary", "rationale", "package_text"))},
+             }, ("addressed_handle", "kind", "objective", "summary", "rationale", "package_text"))},
             {"name": "codecollab_share_send",
              "description": ("Send a reviewed CodeCollab handoff draft: uploads only the files in its local "
-                             "manifest and makes the package immutable and team-visible. " + rule),
-             "inputSchema": _obj({"handoff_id": _ID}, ("handoff_id",))},
+                             "manifest and makes the package immutable and team-visible. It is refused "
+                             "while the draft has completeness_issues not named in override_issues. " + rule),
+             "inputSchema": _obj({
+                 "handoff_id": _ID,
+                 "override_issues": {"type": "array", "items": _S, "maxItems": 50,
+                                     "description": OVERRIDE_ISSUES_GUIDANCE}}, ("handoff_id",))},
             {"name": "codecollab_shared",
              "description": (
                  "The CodeCollab team handoff inbox (read-only). action=list shows every package with its "

@@ -229,14 +229,20 @@ def shared_command(name: str, args: dict, session: str | None) -> dict:
     if name == "codecollab_share":
         if args.get("source_event_ids") and not str(args.get("project_key") or "").strip():
             raise ValueError("source_event_ids require project_key; no draft created")
-        keys = ("addressed_handle", "objective", "summary", "rationale", "package_text", "files", "source_refs",
+        keys = ("addressed_handle", "kind", "objective", "summary", "rationale", "package_text", "files", "source_refs",
                 "project_key", "source_event_ids", "persisted_file_ids", "persisted_paths")
         payload = {k: args[k] for k in keys if k in args}
         if session:
             payload["session_id"] = session
         return {"command": "draft", "payload": payload}
     if name == "codecollab_share_send":
-        return {"command": "confirm", "handoff_id": _text(args.get("handoff_id"), "handoff_id")}
+        command = {"command": "confirm", "handoff_id": _text(args.get("handoff_id"), "handoff_id")}
+        overrides = args.get("override_issues")
+        if overrides:
+            if not isinstance(overrides, list) or not all(isinstance(c, str) for c in overrides):
+                raise ValueError("override_issues must be a list of issue codes")
+            command["override_issues"] = overrides
+        return command
     if name == "codecollab_shared":
         action = args.get("action")
         if action not in ("list", "get", "seen"):
