@@ -5,7 +5,7 @@ Live-verified on Claude Code 2.1.292 (2026-10-23): a PreToolUse ``permissionDeci
 Claude Code ask the user before the tool runs; in a non-interactive run, where nobody can answer, the
 call is denied; and ``--permission-mode bypassPermissions`` does NOT skip it. That supersedes the
 earlier "command convention" (docs/DECISIONS.md, 2026-10-17): the same strength of gate OpenCode
-enforces, on the same actions — send, accept, decline, download, claim a handle, re-file the
+enforces, on the same actions — send, accept, decline, close, download, claim a handle, re-file the
 session's project, deliver a backfill.
 
 Two routes reach those actions, and both are gated:
@@ -27,12 +27,13 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import tool_specs  # noqa: E402
 
-_SHARED_MUTATIONS = re.compile(r'"command"\s*:\s*"(confirm|accept|decline|download)"')
+_SHARED_MUTATIONS = re.compile(r'"command"\s*:\s*"(confirm|accept|decline|close|download)"')
 _CLAIM = re.compile(r'"command"\s*:\s*"handles"[^}]*"action"\s*:\s*"claim"|"action"\s*:\s*"claim"[^}]*"command"\s*:\s*"handles"')
 _REASONS = {
     "codecollab_share_send": "Send this CodeCollab handoff to the teammate (uploads its files)",
     "codecollab_shared_accept": "Pick up this CodeCollab team handoff",
     "codecollab_shared_decline": "Record a decline of this CodeCollab team handoff",
+    "codecollab_shared_close": "Mark this CodeCollab team handoff closed (done)",
     "codecollab_shared_download": "Get a download link for this CodeCollab handoff artifact",
     "codecollab_handle_claim": "Claim or change your CodeCollab handle",
     "codecollab_project_use": "Re-file where this conversation's work is saved in CodeCollab",
@@ -49,7 +50,8 @@ def _bash_action(command: str) -> str | None:
     if "shared_handoff.py" in command and "command-json" in command:
         if (m := _SHARED_MUTATIONS.search(command)):
             return {"confirm": "codecollab_share_send", "accept": "codecollab_shared_accept",
-                    "decline": "codecollab_shared_decline", "download": "codecollab_shared_download"}[m.group(1)]
+                    "decline": "codecollab_shared_decline", "close": "codecollab_shared_close",
+                    "download": "codecollab_shared_download"}[m.group(1)]
         if _CLAIM.search(command):
             return "codecollab_handle_claim"
     if "project.py" in command and re.search(r"\buse\b", command):

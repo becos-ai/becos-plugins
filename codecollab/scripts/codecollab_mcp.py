@@ -255,6 +255,12 @@ def shared_command(name: str, args: dict, session: str | None) -> dict:
         return command
     if name in ("codecollab_shared_accept", "codecollab_shared_decline"):
         return {"command": name.rsplit("_", 1)[1], "handoff_id": _text(args.get("handoff_id"), "handoff_id")}
+    if name == "codecollab_shared_close":
+        command = {"command": "close", "handoff_id": _text(args.get("handoff_id"), "handoff_id")}
+        note = args.get("note")
+        if isinstance(note, str) and note.strip():
+            command["note"] = note.strip()
+        return command
     if name == "codecollab_shared_download":
         return {"command": "download", "handoff_id": _text(args.get("handoff_id"), "handoff_id"),
                 "artifact_id": _text(args.get("artifact_id"), "artifact_id")}
@@ -310,7 +316,8 @@ HANDLERS = {
 }
 SHARED_TOOLS = frozenset({"codecollab_handles", "codecollab_handle_claim", "codecollab_share",
                           "codecollab_share_send", "codecollab_shared", "codecollab_shared_accept",
-                          "codecollab_shared_decline", "codecollab_shared_download"})
+                          "codecollab_shared_decline", "codecollab_shared_close",
+                          "codecollab_shared_download"})
 
 
 def _version() -> str:
