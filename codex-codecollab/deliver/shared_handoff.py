@@ -1144,6 +1144,16 @@ def _override_list(value: object) -> list[str] | None:
     return value
 
 
+def close_handoff(handoff_id: object, note: object = None) -> object:
+    """Mark a picked-up package closed, with an optional one-line note (the server bounds it)."""
+    if not isinstance(handoff_id, str) or not _ID_RE.fullmatch(handoff_id):
+        raise SharedHandoffError("a valid handoff_id is required")
+    arguments = {"action": "close", "handoff_id": handoff_id}
+    if isinstance(note, str) and note.strip():
+        arguments["note"] = " ".join(note.split())
+    return call(HANDOFF_TOOL, arguments)
+
+
 def _json_command(payload: object, cwd: str) -> object:
     if not isinstance(payload, dict):
         raise SharedHandoffError("command input must be a JSON object")
@@ -1162,6 +1172,8 @@ def _json_command(payload: object, cwd: str) -> object:
             return mark_seen(payload.get("handoff_id"), notified=bool(payload.get("notified")))
         return render_package(
             call(HANDOFF_TOOL, {"action": command, "handoff_id": payload.get("handoff_id")}))
+    if command == "close":
+        return close_handoff(payload.get("handoff_id"), payload.get("note"))
     if command == "download":
         return call(ARTIFACT_TOOL, {"action": "download", "handoff_id": payload.get("handoff_id"),
                                     "artifact_id": payload.get("artifact_id")})
@@ -1178,7 +1190,8 @@ def _json_command(payload: object, cwd: str) -> object:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="shared_handoff.py")
     parser.add_argument("command", choices=("draft", "confirm", "list", "get", "seen", "accept",
-                                             "decline", "download", "handles", "refresh", "consume",
+                                             "decline", "close", "download", "handles", "refresh",
+                                             "consume",
                                              "notify", "command-json", "persist-turn",
                                              "persist-turn-hook"))
     parser.add_argument("value", nargs="?")
@@ -1225,6 +1238,8 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command in {"accept", "decline"}:
         _print(render_package(
             call(HANDOFF_TOOL, {"action": args.command, "handoff_id": args.value})))
+    elif args.command == "close":
+        _print(close_handoff(args.value, args.extra))
     elif args.command == "download":
         _print(call(ARTIFACT_TOOL, {"action": "download", "handoff_id": args.value,
                                     "artifact_id": args.extra}))

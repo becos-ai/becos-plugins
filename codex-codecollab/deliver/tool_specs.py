@@ -58,6 +58,7 @@ MUTATING = (
     "codecollab_share_send",
     "codecollab_shared_accept",
     "codecollab_shared_decline",
+    "codecollab_shared_close",
     "codecollab_shared_download",
     "codecollab_handle_claim",
     "codecollab_project_use",
@@ -248,6 +249,13 @@ def tools(host: str = "claude", *, projects: bool = True, shared: bool = True,
             {"name": "codecollab_shared_decline",
              "description": "Record your personal decline of a team handoff. " + rule,
              "inputSchema": _obj({"handoff_id": _ID}, ("handoff_id",))},
+            {"name": "codecollab_shared_close",
+             "description": ("Mark a picked-up team handoff closed: done, once and for good, with an optional "
+                             "one-line note (a PR or commit link, up to 200 characters). Only its sender or the "
+                             "person who picked it up can close it. " + rule),
+             "inputSchema": _obj({"handoff_id": _ID,
+                                  "note": {"type": "string", "description": "Optional one-line outcome, e.g. a PR link."}},
+                                 ("handoff_id",))},
             {"name": "codecollab_shared_download",
              "description": ("Get a short-lived download link for one artifact of a team handoff. Give the link "
                              "to the user; do not fetch it unless asked. " + rule),
