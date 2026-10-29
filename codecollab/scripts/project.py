@@ -495,6 +495,11 @@ def use(cwd: str | None, session_id: object, name: str | None = None, *, new: bo
         capture._debug(f"project: could not write {target}: {type(exc).__name__}")
     resolved = Resolution(key, name, type_, source or "chosen", written)
     write_session(session_id, resolved)
+    try:
+        import project_repo  # noqa: PLC0415 — lazy: it imports this module
+        project_repo.spawn_sync(cwd, session_id, force=True)   # clone the chosen project's folder
+    except Exception as exc:  # noqa: BLE001 — never fails the choice
+        capture._debug(f"project: repo sync not started: {type(exc).__name__}")
     return resolved
 
 

@@ -6,7 +6,8 @@
           { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/capture.py\" observe", "timeout": 5 },
           { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/recall.py\"", "timeout": 60 },
           { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/handoff.py\" prompt-submit", "timeout": 5 },
-          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/shared_handoff.py\" notify", "timeout": 5 }
+          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/shared_handoff.py\" notify", "timeout": 5 },
+          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/project_repo.py\" prompt-submit", "timeout": 5 }
         ]
       }
     ],
@@ -67,13 +68,20 @@
         "hooks": [
           { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/approval_gate.py\"", "timeout": 5 }
         ]
+      },
+      {
+        "matcher": "Read|Grep|Glob|LS",
+        "hooks": [
+          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/project_repo.py\" pre-tool-use", "timeout": 5 }
+        ]
       }
     ],
     "SessionEnd": [
       {
         "hooks": [
           { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/capture.py\" finalize" },
-          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/handoff.py\" session-end", "timeout": 5 }
+          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/handoff.py\" session-end", "timeout": 5 },
+          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/project_repo.py\" session-end", "timeout": 5 }
         ]
       }
     ]
