@@ -54,6 +54,11 @@
             "command": "bash -lc 'set -a; [ -f \"$HOME/.codex/codecollab.env\" ] && . \"$HOME/.codex/codecollab.env\" >/dev/null 2>&1; set +a; export VONIC_CODECOLLAB_CLIENT_TAG=cx; exec python3 \"${PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/hooks/codex_shared.py\"'",
             "timeout": 5,
             "additionalContextLimit": 2000
+          },
+          {
+            "type": "command",
+            "command": "bash -lc 'set -a; [ -f \"$HOME/.codex/codecollab.env\" ] && . \"$HOME/.codex/codecollab.env\" >/dev/null 2>&1; set +a; export VONIC_CODECOLLAB_CLIENT_TAG=cx; exec python3 \"${PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/deliver/project_repo.py\" prompt-submit'",
+            "timeout": 5
           }
         ]
       }
@@ -104,6 +109,11 @@
             "type": "command",
             "command": "bash -lc 'set -a; [ -f \"$HOME/.codex/codecollab.env\" ] && . \"$HOME/.codex/codecollab.env\" >/dev/null 2>&1; set +a; export VONIC_CODECOLLAB_CLIENT_TAG=cx; exec python3 \"${PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/deliver/handoff.py\" session-end'",
             "timeout": 3
+          },
+          {
+            "type": "command",
+            "command": "bash -lc 'set -a; [ -f \"$HOME/.codex/codecollab.env\" ] && . \"$HOME/.codex/codecollab.env\" >/dev/null 2>&1; set +a; export VONIC_CODECOLLAB_CLIENT_TAG=cx; exec python3 \"${PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/deliver/project_repo.py\" session-end'",
+            "timeout": 5
           }
         ]
       }

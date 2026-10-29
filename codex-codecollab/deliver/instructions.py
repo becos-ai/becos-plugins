@@ -36,6 +36,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import capture  # noqa: E402
 import project  # noqa: E402
+import project_repo  # noqa: E402
 import provenance  # noqa: E402
 import rulebook  # noqa: E402
 
@@ -95,6 +96,16 @@ def session_start_output(event: dict) -> tuple[str | None, str | None]:
         context, notice = "", ""
     if context:
         text = f"{text}\n\n{context}" if text else context
+    try:
+        # The project's compiled folder (project_repo.py): name it, then refresh it detached.
+        cwd = event.get("cwd") or os.getcwd()
+        folder = project_repo.context(cwd, event.get("session_id"))
+        project_repo.spawn_sync(cwd, event.get("session_id"),
+                                force=event.get("source") != "compact")
+    except Exception:  # noqa: BLE001 — never blocks the rest
+        folder = ""
+    if folder:
+        text = f"{text}\n\n{folder}" if text else folder
     return text or None, notice or None
 
 

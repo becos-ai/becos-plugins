@@ -254,7 +254,39 @@ def _turn_activity(payload: dict, state: dict,
         state["source"] = source
     ops = _ops_from(records)
     paths = [op["path"] for op in ops]
+    # Every assistant message of the turn, not only the last: text Codex writes between tool calls
+    # (plans, findings, drafts) is lost when only ``last_assistant_message`` is sent. The caller
+    # pops it before the state is saved.
+    state["turn_assistant_texts"] = _assistant_texts(records)
     return paths, _repo_activity(paths, state.get("cwd", cwd)), ops, _ran_team_activity(records)
+
+
+def _assistant_texts(records: list[dict]) -> list[str]:
+    """The ``output_text`` of each assistant ``message`` in rollout ``records``, in order."""
+    texts: list[str] = []
+    for rec in records:
+        payload = rec.get("payload")
+        if not (rec.get("type") == "response_item" and isinstance(payload, dict)
+                and payload.get("type") == "message" and payload.get("role") == "assistant"):
+            continue
+        content = payload.get("content")
+        parts = [item.get("text") for item in content if isinstance(item, dict)
+                 and item.get("type") == "output_text" and isinstance(item.get("text"), str)] \
+            if isinstance(content, list) else []
+        text = "\n".join(part for part in parts if part.strip()).strip()
+        if text and (not texts or texts[-1] != text):
+            texts.append(text)
+    return texts
+
+
+def _full_reply(texts: list[str], last: str) -> str:
+    """The turn's assistant text: every rollout message joined, with the hook's final message kept
+    when the rollout missed it (a write still in flight). Falls back to ``last`` alone."""
+    if not texts:
+        return last
+    if last and last not in texts:
+        texts = [*texts, last]
+    return "\n\n".join(texts)
 
 
 def _auto_project_notice(cwd: str, session_id: str, turns: int, *, final: bool) -> str | None:
@@ -399,6 +431,7 @@ def main() -> int:
         user = state.pop("pending_user", "")
         if event == "Stop" and (user or assistant):
             files, repos, file_ops, team_activity = _turn_activity(payload, state, cwd)
+            assistant = _full_reply(state.pop("turn_assistant_texts", []), assistant)
             turn = {"seq": len(turns), "ts": _iso_now(),
                     "user": user, "assistant": assistant, "files": files}
             if team_activity:
