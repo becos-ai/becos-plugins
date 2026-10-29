@@ -66,10 +66,19 @@ _SAFE_EXTENSIONS = {
     # Bug evidence (all text, so the credential scan reads them like any other source file).
     ".diff", ".ipynb", ".java", ".kt", ".log", ".patch", ".rb", ".sh", ".sql",
     ".svg", ".toml", ".ts", ".tsx", ".txt", ".webp", ".xml", ".yaml", ".yml",
+    # Documents a nocode project's agent produces; they reach the project repo's files/.
+    ".docx", ".pptx", ".rtf", ".tsv", ".xlsx",
 }
 _SENSITIVE_NAMES = {".env", ".git", ".ssh", ".aws", ".gnupg", "credentials", "secrets"}
 _SENSITIVE_SUFFIXES = {".key", ".pem", ".p12", ".pfx", ".jks", ".keystore"}
-_OPAQUE_EXTENSIONS = {".gif", ".jpeg", ".jpg", ".pdf", ".png", ".svg", ".webp"}
+_OPAQUE_EXTENSIONS = {".gif", ".jpeg", ".jpg", ".pdf", ".png", ".svg", ".webp",
+                      ".docx", ".pptx", ".xlsx"}
+# Office types some hosts' mimetypes tables lack (the fallback would mislabel them text/plain).
+_OFFICE_TYPES = {
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+}
 
 # How each runtime's user/model reaches the inbox, keyed by VONIC_CODECOLLAB_CLIENT_TAG. The
 # notice and the accepted-context hint name what THIS runtime can actually invoke; the server's
@@ -488,7 +497,8 @@ def inspect_file(root: Path, raw: str, remaining: int) -> dict:
     data = reviewed["data"]
     return {
         "root": str(root), "relative_path": relative.as_posix(), "filename": relative.name,
-        "content_type": mimetypes.guess_type(relative.name)[0] or "text/plain",
+        "content_type": (_OFFICE_TYPES.get(relative.suffix.casefold())
+                         or mimetypes.guess_type(relative.name)[0] or "text/plain"),
         "size_bytes": len(data), "sha256": hashlib.sha256(data).hexdigest(),
         "content_b64": base64.b64encode(data).decode(),
         "linkage": reviewed["linkage"], "mtime_ns": reviewed["mtime_ns"],

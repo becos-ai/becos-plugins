@@ -26,6 +26,9 @@ can grep and read it like any files:
   ``.git/config`` or put on a command line.
 * A non-blocking ``flock`` per repo: a second session on the machine skips that round.
 * ``git`` missing or anything failing: logged in debug, never raised into a hook.
+* A mirror whose project is gone from the team's project list is deleted (:func:`prune`): checked
+  at most every 6 hours from the background sync, and at once when the server reports the
+  project's repository missing. Only folders this module cloned are touched.
 
 Off unless ``VONIC_CODECOLLAB_PROJECT_REPO=1`` (rollout: on in dev profiles first).
 """
@@ -52,9 +55,12 @@ _ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _DEFAULT_INTERVAL = 300
 _GIT_TIMEOUT = 120
 LIVE_DOCS = ("product-strategy.md", "roadmap.md", "todos.md", "features/", "decisions/",
-             "rejected-ideas.md", "failed-approaches.md")
+             "rejected-ideas.md", "failed-approaches.md", "files/")
 # The Claude Code tools that only read; the PreToolUse hook allows these inside the mirror root.
 _READ_TOOLS = frozenset({"Read", "Grep", "Glob", "LS"})
+_PRUNE_EVERY = 6 * 3600
+# The server lists at most this many projects; a listing this long may be cut off, so no prune.
+_LIST_CEILING = 500
 
 
 def enabled() -> bool:
@@ -204,12 +210,91 @@ def sync(name: str, *, force: bool = False) -> dict:
                 done = _git(["clean", "-qfdx"], cwd=path)
             action = "updated"
         if done.returncode != 0:
+            if action == "updated" and _repo_missing(done.stderr):
+                # The project may have been deleted: check the listing now, not in 6 hours.
+                lock.close()             # prune takes this repo's lock itself
+                removed = prune(tenant, keep=(), force=True)
+                if path in removed:
+                    return {"status": "removed", "path": path}
             raise SyncError(_reason(done.stderr))
         head = _git(["rev-parse", "--short", "HEAD"], cwd=path).stdout.strip()
         _save_state({"synced": {**(_state().get("synced") or {}), path: time.time()}})
         return {"status": action, "path": path, "head": head}
     finally:
         lock.close()
+
+
+def _repo_missing(stderr: str) -> bool:
+    text = (stderr or "").lower()
+    # HTTP: "repository '…' not found" (the git server's 404); a local remote (tests): the path
+    # is no longer a repository.
+    return ("not found" in text or "error: 404" in text
+            or "does not appear to be a git repository" in text)
+
+
+def _origin_matches(path: str, tenant: str, name: str) -> bool:
+    """``path`` is a mirror this module cloned: its origin is this project's /git/ URL."""
+    done = _git(["config", "--get", "remote.origin.url"], cwd=path)
+    return done.returncode == 0 and done.stdout.strip().endswith(f"/git/{tenant}/{name}.git")
+
+
+def listed_names() -> set[str] | None:
+    """Every nocode project name in the caller's team, fresh from the server; None when the list
+    can't be trusted (a failure, or a listing long enough to be cut off)."""
+    try:
+        data = project.call({"action": "list"})
+    except Exception as exc:  # noqa: BLE001 — no listing, no prune
+        capture._debug(f"project-repo: listing failed: {type(exc).__name__}")
+        return None
+    projects = data.get("projects")
+    if not isinstance(projects, list) or len(projects) >= _LIST_CEILING:
+        return None
+    names = set()
+    for entry in projects:
+        key = entry.get("key") if isinstance(entry, dict) else None
+        if isinstance(key, str) and key.startswith(project.NOCODE_PREFIX):
+            names.add(key[len(project.NOCODE_PREFIX):])
+    return names
+
+
+def prune(tenant: str, *, keep: tuple[str, ...] = (), force: bool = False,
+          names: set[str] | None = None) -> list[str]:
+    """Delete the mirrors under ``<root>/<tenant>/`` whose project is no longer in the team's list
+    (a deleted project). Rate-limited to every 6 hours unless ``force``; ``keep`` names are never
+    removed (the session's own project). Returns the removed paths."""
+    base = os.path.join(root(), tenant) if _ID_RE.match(tenant or "") else ""
+    if not base or not os.path.isdir(base):
+        return []
+    pruned_at = (_state().get("pruned") or {}).get(tenant, 0)
+    if not force and time.time() - float(pruned_at or 0) < _PRUNE_EVERY:
+        return []
+    listed = listed_names() if names is None else names
+    if listed is None:
+        return []
+    _save_state({"pruned": {**(_state().get("pruned") or {}), tenant: time.time()}})
+    removed = []
+    for entry in sorted(os.listdir(base)):
+        path = os.path.join(base, entry)
+        if (entry in listed or entry in keep or not project.valid_name(entry)
+                or os.path.islink(path) or not os.path.isdir(os.path.join(path, ".git"))
+                or not _origin_matches(path, tenant, entry)):
+            continue
+        lock = _lock(os.path.join(root(), ".locks", f"{tenant}-{entry}.lock"))
+        if lock is None:
+            continue
+        try:
+            shutil.rmtree(path)
+        except OSError as exc:
+            capture._debug(f"project-repo: remove failed: {exc}")
+            continue
+        finally:
+            lock.close()
+        removed.append(path)
+        capture._debug(f"project-repo: removed {path} (project no longer exists)")
+    if removed:
+        stamps = _state().get("synced") or {}
+        _save_state({"synced": {k: v for k, v in stamps.items() if k not in removed}})
+    return removed
 
 
 def _reason(stderr: str) -> str:
@@ -272,7 +357,8 @@ def context(cwd: str | None, session_id: object) -> str:
         "It holds what the team worked out in this project, written by the Becos server from "
         "every member's sessions: README.md (index), product-strategy.md, roadmap.md, todos.md, "
         "features/<feature>.md, decisions/, rejected-ideas.md, failed-approaches.md, CHANGELOG.md, "
-        "and sessions/ (dated per-person digests).",
+        "sessions/ (dated per-person digests) and files/ (documents members' agents wrote in "
+        "this project, such as drafts, decks and sheets, copied whole).",
         "When the user's request concerns this project's plans, features, TODOs, decisions or "
         "earlier work, read or grep that folder by its absolute path (it is hidden, so search "
         "tools skip it unless given the path). The live documents are current; sessions/ is "
@@ -385,6 +471,9 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         result = sync(name, force=args.force)
         capture._debug(f"project-repo: {result['status']} {result['path']}")
+        tenant = cached_tenant()
+        if tenant:
+            prune(tenant, keep=(name,))
         return 0
     except Exception as exc:  # noqa: BLE001 — every entry point fails open
         capture._debug(f"project-repo: {args.command} failed: {type(exc).__name__}: {exc}")
