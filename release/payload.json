@@ -1,6 +1,6 @@
 {
   "_comment": "ALLOWLIST. Only paths listed in `include` are published. Anything not listed here never leaves the private repo. Adding a file to a source repo does NOT publish it - it must be added here deliberately.",
-  "allowed_root_files": [".gitignore", "README.md", "LICENSE"],
+  "allowed_root_files": [".gitignore", "README.md", "LICENSE", "install.sh"],
   "allowed_root_dirs": [".claude-plugin", ".agents", ".github", "release", "becos", "becos-codex", "codecollab", "codex-codecollab"],
   "plugins": [
     {

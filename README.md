@@ -15,6 +15,27 @@ card for details.
 This repository is a plugin marketplace for **Claude Code** and **Codex**. The opencode plugin
 ships on npm (see below).
 
+## Install, update or remove with one command
+
+```bash
+curl -fsSL https://becos.ai/install.sh | bash
+```
+
+[`install.sh`](install.sh) finds which of Claude Code, Codex and opencode are on your machine,
+installs becos in each (replacing the old codecollab plugin if it finds it), and signs you in once
+in the browser; one sign-in covers every agent. Then restart your agent. In Codex, also run `/hooks`
+and trust the becos hooks.
+
+```bash
+curl -fsSL https://becos.ai/install.sh | bash -s -- update      # update to the latest
+curl -fsSL https://becos.ai/install.sh | bash -s -- uninstall   # remove becos (add --purge to delete the local sign-in too)
+curl -fsSL https://becos.ai/install.sh | bash -s -- login       # sign in again
+```
+
+`--only claude,codex,opencode` limits it to some agents; `--no-login` skips the sign-in. It needs
+`python3`, which the plugins run on. becos.ai/install.sh fetches the script from this repository,
+so you can read exactly what runs. To run the steps yourself instead, use the sections below.
+
 ## Claude Code
 
 ```bash
@@ -78,6 +99,8 @@ capture nothing, recall nothing and have no tools, and only tell you how to swit
 pending turns and history carry over — local state and every `VONIC_*` setting keep their names, so
 you do not sign in again. Having both installed never captures twice.
 
+The install script above makes this switch for you in every agent it finds. To do it by hand:
+
 **Claude Code** — swap the plugin, then restart Claude Code:
 
 ```bash
@@ -116,6 +139,7 @@ Gateway tools (`vonic_*`, e.g. `vonic_resolve_event`) keep their names everywher
 | `becos-codex/` | the Codex plugin (`becos@becos` in the Codex marketplace) |
 | `codecollab/`, `codex-codecollab/` | the retired codecollab stubs that point users to becos |
 | `.claude-plugin/`, `.agents/` | the two marketplace manifests |
+| `install.sh` | the one-command installer that becos.ai/install.sh runs |
 | `release/` | how payloads get published here |
 
 Licensed under [Apache-2.0](LICENSE).
