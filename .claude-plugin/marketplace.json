@@ -4,13 +4,18 @@
     "name": "Becos"
   },
   "metadata": {
-    "description": "Becos codecollab plugins for AI coding agents."
+    "description": "becos plugins for AI coding agents: team memory captured from your coding sessions and recalled before each prompt."
   },
   "plugins": [
     {
+      "name": "becos",
+      "source": "./becos",
+      "description": "Captures each Claude Code turn to your team's becos brain and recalls relevant memory before each prompt. On by default, it sends the prompt and text reply plus the commands run, their output, code edits and the paths of files edited, with the repository, branch, author and commit. Bodies are secret-redacted (best effort) and size-capped, and each category can be turned off (VONIC_CAPTURE_COMMANDS/OUTPUTS/CODE/FILES=0). Thinking is never sent unless you opt in (VONIC_CAPTURE_THINKING=1, off by default). After installing, run /becos:login, then /becos:backfill for existing sessions."
+    },
+    {
       "name": "codecollab",
       "source": "./codecollab",
-      "description": "Incrementally ships each Claude Code turn's prompt + text reply to the tenant's gbrain. Never sends thinking, tool calls, code, or patches unless you opt in (VONIC_CAPTURE_THINKING / VONIC_CAPTURE_CODE, both off by default). After installing, run /codecollab:login, then /codecollab:backfill for existing sessions."
+      "description": "Retired: codecollab is now becos — install becos@becos. This plugin captures nothing, recalls nothing and has no tools; it only tells you how to switch. Your sign-in and history carry over."
     }
   ]
 }

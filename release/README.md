@@ -34,9 +34,9 @@ source tree, commits as `release: <plugin> <version>`, and tags `<plugin>--v<ver
 ## Doing it by hand
 
 ```bash
-python3 release/sync_payload.py --plugin codecollab --from ~/vonic_code/becos-claude-plugin
+python3 release/sync_payload.py --plugin becos --from ~/vonic_code/becos-claude-plugin
 python3 release/validate.py
-python3 release/sync_payload.py --plugin codecollab --from ~/vonic_code/becos-claude-plugin --check
+python3 release/sync_payload.py --plugin becos --from ~/vonic_code/becos-claude-plugin --check
 ```
 
 `--check` writes nothing and exits non-zero on any drift between this repo and the source tree.
@@ -49,6 +49,19 @@ python3 release/sync_payload.py --plugin codecollab --from ~/vonic_code/becos-cl
    at `.github/workflows/publish-payload.yml`, with `PLUGIN_ID` set:
    - `becos-ai/becos-claude-plugin` → `codecollab`
    - `becos-ai/codex-codecollab-plugin` → `codex-codecollab`
+
+   Since the codecollab → becos rename, each source repo publishes **two** ids, one after the
+   other (a `matrix` over `PLUGIN_ID` in its own copy of the workflow):
+
+   | Source repo | id | `source_subdir` | `dest` | What it is |
+   | --- | --- | --- | --- | --- |
+   | `becos-ai/becos-claude-plugin` | `becos` | `codecollab` | `becos/` | the Claude Code plugin, `becos@becos` |
+   | | `codecollab` | `legacy/codecollab` | `codecollab/` | retired stub: tells `codecollab@becos` users to switch |
+   | `becos-ai/codex-codecollab-plugin` | `becos-codex` | `.` | `becos-codex/` | the Codex plugin, `becos@becos` |
+   | | `codex-codecollab` | `legacy` | `codex-codecollab/` | retired stub: tells `codex-codecollab@becos` users to switch |
+
+   The stubs capture nothing, recall nothing and have no tools, so having both installed never
+   double-captures.
 
 Verified live on 2026-09-22: both repos dispatched the workflow and it ran green end to end —
 checkout, allowlist copy, `validate.py`, and the `--check` drift proof — then correctly published
@@ -95,5 +108,5 @@ contents are meant to be public, so the blast radius is already small.
       - The Claude manifest declares no licence at all.
       - Neither this `LICENSE` nor the oc one fills in the appendix's
         `Copyright [yyyy] [name of copyright owner]`, so no copyright holder is asserted anywhere.
-- [ ] Re-read `codecollab/` and `codex-codecollab/` in full. Publishing is irreversible: forks
+- [ ] Re-read `becos/`, `becos-codex/`, `codecollab/` and `codex-codecollab/` in full. Publishing is irreversible: forks
       survive repository deletion.

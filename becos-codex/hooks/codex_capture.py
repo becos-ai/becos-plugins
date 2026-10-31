@@ -1,0 +1,489 @@
+#!/usr/bin/env python3
+"""Codex capture adapter (client tag `cx`).
+
+Codex runs this as a **hook command** (config in ~/.codex/hooks.json). It reads the hook's JSON
+payload on stdin, keyed by `hook_event_name`, and turns each completed Q&A into a becos turn
+that it hands to the **vendored** delivery core (`deliver/capture.py deliver-session`) — the same
+entrypoint the Opencode port uses. This adapter never reimplements privacy/auth/dedup/delivery.
+
+Why we build turns from the hook payload (not the transcript):
+  Codex hook stdin gives us the two stable, documented fields we need —
+    * UserPromptSubmit -> {"prompt": "..."}          (the user's text)
+    * Stop             -> {"last_assistant_message": "..."}  (the assistant's text reply)
+  We pair them per session. We read these two fields because they are the *simplest stable source*
+  for the core turn text: the `transcript_path` rollout.jsonl "isn't a stable interface for hooks and
+  may change over time" (Codex docs). A tested *consequence* of only reading these two fields is that
+  reasoning / command output / tool I/O never leave the machine (asserted in test/test_capture_cx.py)
+  — that is a real guarantee, but it is a byproduct of the sourcing choice, not the reason for it, and
+  it is not an absolute project invariant: file-touch enrichment (`changed_files` / repo activity)
+  reads additional signals on purpose. Those enrichment paths must keep the same privacy bar (paths
+  and repo slugs only, never file contents/diffs).
+
+Events -> action:
+  SessionStart      -> sweep  (retry any buffers a prior session left undelivered); install the
+                       skills; refresh the shared-handoff inbox (detached)
+  UserPromptSubmit  -> stash the prompt as this session's pending user turn (recall is a *separate*
+                       hook: deliver/recall.py, wired in hooks.json)
+  Stop              -> complete the turn with last_assistant_message; deliver the whole session;
+                       hand the turn's written files to the core's nocode persistence (detached)
+  SessionEnd        -> deliver + finalize (mark the session done)
+
+Fail-open: any error exits 0 so Codex is never blocked. Set VONIC_CODECOLLAB_DEBUG=1 to log.
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+DELIVER = HERE.parent / "deliver" / "capture.py"
+CACHE = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "codecollab"
+PENDING_DIR = CACHE / "cx-pending"          # per-session accumulated turns (survives between hooks)
+LOG = CACHE / "cx-plugin.log"
+CLIENT_TAG = os.environ.get("VONIC_CODECOLLAB_CLIENT_TAG", "cx")
+
+
+def _debug(msg: str) -> None:
+    if os.environ.get("VONIC_CODECOLLAB_DEBUG") != "1":
+        return
+    try:
+        CACHE.mkdir(parents=True, exist_ok=True)
+        with open(LOG, "a", encoding="utf-8") as fh:
+            fh.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} {msg}\n")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _pending_path(session_id: str) -> Path:
+    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in session_id) or "session"
+    return PENDING_DIR / f"{safe}.json"
+
+
+def _load_pending(session_id: str) -> dict:
+    try:
+        return json.loads(_pending_path(session_id).read_text("utf-8"))
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _save_pending(session_id: str, state: dict) -> None:
+    PENDING_DIR.mkdir(parents=True, exist_ok=True)
+    _pending_path(session_id).write_text(json.dumps(state), "utf-8")
+
+
+def _spawn_detached(args: list[str], stdin_text: str | None = None) -> None:
+    """Fire-and-forget the vendored core so no hook blocks on the network.
+
+    Hooks have tight budgets (SessionEnd: max 3s). Delivery is buffered locally first and retried by
+    the SessionStart sweep, so it is always safe to detach and not wait.
+    """
+    try:
+        p = subprocess.Popen(  # noqa: S603
+            args,
+            stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        if stdin_text is not None:
+            try:
+                p.stdin.write(stdin_text.encode())
+                p.stdin.close()
+            except Exception:  # noqa: BLE001
+                pass
+    except Exception as exc:  # noqa: BLE001 — never block Codex
+        _debug(f"spawn failed: {exc}")
+
+
+def _deliver_session(session: dict, event_kind: str) -> None:
+    """Pipe a pre-normalized session to the vendored `capture.py deliver-session` (detached)."""
+    _spawn_detached([sys.executable, str(DELIVER), "deliver-session", event_kind],
+                    stdin_text=json.dumps(session))
+
+
+# `patch_apply_end` change kind -> the vendored core's file-op vocabulary (repo_activity._OP_RANK).
+_OP_FOR_KIND = {"add": "created", "delete": "deleted", "update": "modified"}
+
+
+def _changed_paths(transcript_path: str, offset: int) -> tuple[list[str], int]:
+    """Absolute paths this turn WROTE since `offset`, plus the new offset (see `_changed_ops`)."""
+    ops, new_offset = _changed_ops(transcript_path, offset)
+    return [op["path"] for op in ops], new_offset
+
+
+def _changed_ops(transcript_path: str, offset: int) -> tuple[list[dict], int]:
+    """File ops (``{"path", "op"}``) this turn WROTE, read from the rollout since `offset`; plus the
+    new offset (see `_ops_from`)."""
+    records, new_offset = _read_rollout(transcript_path, offset)
+    return _ops_from(records), new_offset
+
+
+def _read_rollout(transcript_path: str, offset: int) -> tuple[list[dict], int]:
+    """The rollout's records since `offset`, plus the new offset. Defensive + fail-closed — an
+    unreadable file yields nothing, and a torn final line (a write in flight) is left unconsumed so
+    the next turn re-reads it instead of losing it."""
+    if not transcript_path:
+        return [], offset
+    try:
+        with open(transcript_path, "rb") as fh:
+            fh.seek(offset)
+            raw = fh.readlines()
+            new_offset = fh.tell()
+    except OSError as exc:  # noqa: BLE001
+        _debug(f"rollout read failed: {exc}")
+        return [], offset
+    if raw and not raw[-1].endswith(b"\n"):   # partial trailing write — re-read it next time
+        new_offset -= len(raw[-1])
+        raw = raw[:-1]
+    records: list[dict] = []
+    for line in raw:
+        try:
+            rec = json.loads(line.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            continue  # a torn or non-UTF8 line — skip, never guess
+        if isinstance(rec, dict):
+            records.append(rec)
+    return records, new_offset
+
+
+# Team activity answers describe OTHER people's work; a turn that ran it is marked so the server
+# does not store the agent's restatement as the user's own facts (TODOS #18). Codex runs it through
+# the `becos-team` skill's shell command, or as an MCP tool where one is configured.
+_TEAM_ACTIVITY_SCRIPT = "team_activity.py"
+_TEAM_ACTIVITY_TOOLS = {"vonic_team_activity", "becos_team", "codecollab_team"}  # codecollab_* before 0.28.0
+# The rollout records that are the agent's own tool calls, across Codex versions: shell and exec
+# calls, the code-mode `exec` tool, and MCP calls. Messages are never inspected, so a reply that
+# merely MENTIONS the script does not mark the turn.
+_CALL_TYPES = {"function_call", "custom_tool_call", "local_shell_call", "exec_command_begin",
+               "mcp_tool_call_begin"}
+
+
+def _session_source(records: list[dict]) -> str:
+    """How Codex was started, from the rollout's ``session_meta``: ``exec`` for ``codex exec`` (a
+    program running Codex), ``cli`` / ``vscode`` interactively. Empty when the line isn't here."""
+    for rec in records:
+        payload = rec.get("payload")
+        if rec.get("type") == "session_meta" and isinstance(payload, dict):
+            source = payload.get("source")
+            return source[:64] if isinstance(source, str) else ""
+    return ""
+
+
+def _ran_team_activity(records: list[dict]) -> bool:
+    """Whether one of this turn's tool calls ran team activity. Only the yes/no leaves the machine;
+    the command text is read here and never sent."""
+    for rec in records:
+        payload = rec.get("payload")
+        if not (isinstance(payload, dict) and payload.get("type") in _CALL_TYPES):
+            continue
+        invocation = payload.get("invocation") if isinstance(payload.get("invocation"), dict) else {}
+        name = str(payload.get("name") or invocation.get("tool") or "")
+        if re.split(r"__|:|\.", name)[-1] in _TEAM_ACTIVITY_TOOLS:
+            return True
+        call = [payload.get(key) for key in ("arguments", "input", "action", "command")]
+        if _TEAM_ACTIVITY_SCRIPT in json.dumps(call, ensure_ascii=False, default=str):
+            return True
+    return False
+
+
+def _ops_from(records: list[dict]) -> list[dict]:
+    """The file ops in rollout ``records``.
+
+    A file edit lands as an ``event_msg`` whose payload is a ``patch_apply_end`` carrying
+    ``changes`` — a map keyed by absolute path. We take its KEYS (the paths) and each change's
+    ``type`` string (add / update / delete); the ``content`` value (the file body / diff) is never
+    read, so the privacy bar is the same as the rest of capture: paths, never contents. An unexpected
+    shape yields no path rather than a wrong or leaky one.
+    """
+    ops: list[dict] = []
+    seen: set[str] = set()
+    for rec in records:
+        payload = rec.get("payload")
+        if not (isinstance(payload, dict) and payload.get("type") == "patch_apply_end"):
+            continue
+        if payload.get("success") is False:
+            continue  # a patch that failed to apply changed nothing
+        changes = payload.get("changes")
+        if not isinstance(changes, dict):
+            continue
+        for path, change in changes.items():
+            if isinstance(path, str) and path and path not in seen:
+                seen.add(path)
+                kind = change.get("type") if isinstance(change, dict) else None
+                ops.append({"path": path, "op": _OP_FOR_KIND.get(kind, "modified")})
+    return ops
+
+
+def _repo_activity(paths: list[str], cwd: str) -> dict | None:
+    """Repository activity ({repositories, unresolved_paths}) for the turn's written paths, built by
+    the shared resolver so the slug/branch identity matches ``repo_name``. Lazily imports the
+    vendored ``repo_activity`` (a rollout with no edit pays nothing). Fail-open: never raises."""
+    if not paths:
+        return None
+    try:
+        deliver_dir = str(DELIVER.parent)
+        if deliver_dir not in sys.path:
+            sys.path.insert(0, deliver_dir)
+        import repo_activity  # noqa: PLC0415 — lazy: only when a turn wrote files
+        return repo_activity.for_paths(paths, cwd)
+    except Exception as exc:  # noqa: BLE001 — enrichment must never break capture
+        _debug(f"repo-activity failed: {exc}")
+        return None
+
+
+def _turn_activity(payload: dict, state: dict,
+                   cwd: str) -> tuple[list[str], dict | None, list[dict], bool]:
+    """The current turn's changed files, repository activity, file ops and whether it ran team
+    activity, advancing the per-session rollout offset stored in ``state``. Codex opens a NEW
+    rollout on resume, so the offset is reset whenever the transcript path moves. Mutates ``state``
+    (the caller persists it); fail-open."""
+    transcript = payload.get("transcript_path") or ""
+    if not transcript:
+        return [], None, [], False
+    if state.get("rollout_path") != transcript:     # new rollout file — start from its beginning
+        state["rollout_path"] = transcript
+        state["rollout_offset"] = 0
+    records, new_offset = _read_rollout(transcript, state.get("rollout_offset", 0))
+    state["rollout_offset"] = new_offset
+    source = _session_source(records)   # the first read of a rollout carries its session_meta
+    if source:
+        state["source"] = source
+    ops = _ops_from(records)
+    paths = [op["path"] for op in ops]
+    # Every assistant message of the turn, not only the last: text Codex writes between tool calls
+    # (plans, findings, drafts) is lost when only ``last_assistant_message`` is sent. The caller
+    # pops it before the state is saved.
+    state["turn_assistant_texts"] = _assistant_texts(records)
+    return paths, _repo_activity(paths, state.get("cwd", cwd)), ops, _ran_team_activity(records)
+
+
+def _assistant_texts(records: list[dict]) -> list[str]:
+    """The ``output_text`` of each assistant ``message`` in rollout ``records``, in order."""
+    texts: list[str] = []
+    for rec in records:
+        payload = rec.get("payload")
+        if not (rec.get("type") == "response_item" and isinstance(payload, dict)
+                and payload.get("type") == "message" and payload.get("role") == "assistant"):
+            continue
+        content = payload.get("content")
+        parts = [item.get("text") for item in content if isinstance(item, dict)
+                 and item.get("type") == "output_text" and isinstance(item.get("text"), str)] \
+            if isinstance(content, list) else []
+        text = "\n".join(part for part in parts if part.strip()).strip()
+        if text and (not texts or texts[-1] != text):
+            texts.append(text)
+    return texts
+
+
+def _full_reply(texts: list[str], last: str) -> str:
+    """The turn's assistant text: every rollout message joined, with the hook's final message kept
+    when the rollout missed it (a write still in flight). Falls back to ``last`` alone."""
+    if not texts:
+        return last
+    if last and last not in texts:
+        texts = [*texts, last]
+    return "\n\n".join(texts)
+
+
+def _auto_project_notice(cwd: str, session_id: str, turns: int, *, final: bool) -> str | None:
+    """With projects on: name a project for a session that still has none after its second turn
+    (or at its end) BEFORE delivery, so this hook can tell the user (delivery is detached)."""
+    if os.environ.get("VONIC_CODECOLLAB_PROJECTS", "1").strip() != "1" or not session_id:
+        return None
+    try:
+        sys.path.insert(0, str(DELIVER.parent))
+        import capture  # noqa: PLC0415 — the vendored core; only needed with projects on
+        return capture._maybe_auto_project(cwd, session_id, final=final, turns=turns)
+    except Exception as exc:  # noqa: BLE001 — never block Codex
+        _debug(f"project auto-name skipped: {exc}")
+        return None
+
+
+def _record_fork(payload: dict, session_id: str, cwd: str) -> None:
+    """SessionStart ``source: "fork"``: record the fork once as a lineage fact naming its parent.
+
+    The forked thread's inherited turns never fire this plugin's hooks, so live capture already
+    records only its own new turns; the fact links it to the parent instead of copying the parent's
+    history (the policy OpenCode and Claude Code follow). The parent is the rollout's
+    ``session_meta.forked_from_id``; without one, nothing is recorded. Delivery is detached."""
+    if payload.get("source") != "fork":
+        return
+    parent = None
+    try:
+        with open(payload.get("transcript_path") or "", encoding="utf-8") as fh:
+            for line in fh:
+                rec = json.loads(line)
+                if rec.get("type") == "session_meta" and isinstance(rec.get("payload"), dict):
+                    parent = rec["payload"].get("forked_from_id")
+                    break
+    except (OSError, ValueError):
+        return
+    if not isinstance(parent, str) or not parent:
+        return
+    try:
+        sys.path.insert(0, str(DELIVER.parent))
+        import lifecycle  # noqa: PLC0415 — the vendored core
+        result = lifecycle.append({"client_tag": CLIENT_TAG, "session_id": session_id, "cwd": cwd,
+                                   "source_event_id": f"fork:{parent}", "occurred_at": _iso_now(),
+                                   "type": "fork", "parent_session_id": parent}, send=False)
+    except Exception as exc:  # noqa: BLE001 — a lineage fact must never block Codex
+        _debug(f"fork fact skipped: {exc}")
+        return
+    if result.get("appended"):
+        _spawn_detached([sys.executable, str(DELIVER.parent / "lifecycle.py"), "retry", f"--cwd={cwd}"])
+
+
+def _sweep() -> None:
+    """SessionStart: let the vendored core retry any undelivered buffers (detached)."""
+    _spawn_detached([sys.executable, str(DELIVER), "sweep"])
+
+
+SHARED = DELIVER.parent / "shared_handoff.py"
+
+
+def _shared_handoffs_on() -> bool:
+    """The shared-handoff flag, as the vendored core reads it: default on, explicit exact ``1``."""
+    return os.environ.get("VONIC_CODECOLLAB_SHARED_HANDOFFS", "1") == "1"
+
+
+def _refresh_inbox() -> None:
+    """SessionStart: refresh the team-handoff inbox in the background (detached; the core does its
+    own host/flag checks and fails open), so the next prompt can carry a new-handoff notice."""
+    if _shared_handoffs_on():
+        _spawn_detached([sys.executable, str(SHARED), "refresh"])
+
+
+def _persist_turn(session_id: str, cwd: str, file_ops: list[dict]) -> None:
+    """Stop: hand this turn's created/modified files to the core's ``persist-turn`` (detached).
+
+    The core decides everything else — projects without a git repository only, the opt-out flag,
+    workspace confinement, screening and the size budget; a git-repo session persists nothing.
+    Only two cheap checks here: the flag, and that the turn wrote at least one file."""
+    paths = [op["path"] for op in file_ops if op.get("op") in ("created", "modified")]
+    if not paths or not _shared_handoffs_on():
+        return
+    _spawn_detached([sys.executable, str(SHARED), "persist-turn"],
+                    stdin_text=json.dumps({"cwd": cwd, "session_id": session_id, "paths": paths}))
+
+
+def _ensure_backfill_skill() -> None:
+    """SessionStart: remove the old ``codecollab-*`` skills, then make sure the backfill, login, team
+    and rulebook skills (and, with projects on, the project skill; with shared handoffs on, the
+    share/shared skills, removed when off) are installed as ``becos-*`` (idempotent, fail-open)."""
+    try:
+        from skill_install import (
+            remove_codecollab_skills,
+            ensure_backfill_skill,
+            ensure_login_skill,
+            ensure_project_skill,
+            ensure_rulebook_skill,
+            ensure_shared_handoff_skills,
+            ensure_team_skill,
+        )
+        removed = remove_codecollab_skills()   # the pre-0.28.0 codecollab-* skills (renamed becos-*)
+        if removed:
+            _debug(f"removed old codecollab skills: {', '.join(removed)}")
+        ensure_backfill_skill(HERE.parent)
+        ensure_login_skill(HERE.parent)
+        ensure_team_skill(HERE.parent)
+        ensure_rulebook_skill(HERE.parent)
+        if os.environ.get("VONIC_CODECOLLAB_PROJECTS", "1").strip() == "1":
+            ensure_project_skill(HERE.parent)
+        ensure_shared_handoff_skills(HERE.parent, _shared_handoffs_on())
+    except Exception as exc:  # noqa: BLE001 — never block Codex
+        _debug(f"skill install skipped: {exc}")
+
+
+def main() -> int:
+    if os.environ.get("VONIC_CODECOLLAB_DISABLED") == "1":
+        return 0
+    try:
+        payload = json.load(sys.stdin)
+    except Exception as exc:  # noqa: BLE001
+        _debug(f"bad hook input: {exc}")
+        return 0
+
+    event = payload.get("hook_event_name", "")
+    session_id = payload.get("session_id") or payload.get("thread_id") or ""
+    cwd = payload.get("cwd") or os.getcwd()
+
+    if event == "SessionStart":
+        _record_fork(payload, session_id, cwd)
+        _sweep()
+        _ensure_backfill_skill()   # one-step install of the /backfill skill (idempotent, fail-open)
+        _refresh_inbox()
+        return 0
+
+    if event == "UserPromptSubmit":
+        prompt = (payload.get("prompt") or "").strip()
+        if prompt and not prompt.startswith("/"):
+            state = _load_pending(session_id)
+            state.setdefault("cwd", cwd)
+            state["pending_user"] = prompt
+            _save_pending(session_id, state)
+            _debug(f"prompt stashed  session={session_id[:8]}  {prompt[:60]!r}")
+        return 0
+
+    if event in ("Stop", "SessionEnd"):
+        state = _load_pending(session_id)
+        turns = state.get("turns", [])
+        assistant = (payload.get("last_assistant_message") or "").strip()
+        user = state.pop("pending_user", "")
+        if event == "Stop" and (user or assistant):
+            files, repos, file_ops, team_activity = _turn_activity(payload, state, cwd)
+            assistant = _full_reply(state.pop("turn_assistant_texts", []), assistant)
+            turn = {"seq": len(turns), "ts": _iso_now(),
+                    "user": user, "assistant": assistant, "files": files}
+            if team_activity:
+                turn["team_activity"] = True   # the core marks capture_context (TODOS #18)
+            if state.get("source"):
+                # A headless start (`codex exec`) is a hint the core weighs when it labels who
+                # sent the prompt (TODOS #92).
+                turn["entrypoint"] = state["source"]
+            _persist_turn(session_id, state.get("cwd", cwd), file_ops)
+            if file_ops:
+                # The vendored core builds `changed_files` from `file_ops` (resolved to repo-relative
+                # paths locally); the absolute `files` list alone no longer reaches the wire.
+                turn["file_ops"] = file_ops
+            turn_id = payload.get("turn_id")
+            if isinstance(turn_id, str) and turn_id:
+                # Codex's own turn id, which the rollout's `task_complete` also carries: the vendored
+                # core hashes it into `<session>:cx-v2:<digest>`, so live capture and backfill of the
+                # same turn land on ONE event id. Without it the core falls back to hashing the
+                # wall-clock `ts` above, which backfill can never reproduce.
+                turn["source_message_ids"] = [turn_id]
+            if repos:
+                turn["repos"] = repos   # carried through _record_session -> repositories_touched
+            turns.append(turn)
+            state["turns"] = turns
+            _save_pending(session_id, state)
+        if turns:
+            notice = _auto_project_notice(state.get("cwd", cwd), session_id, len(turns),
+                                          final=(event == "SessionEnd"))
+            if notice and event == "Stop":
+                print(json.dumps({"systemMessage": notice}))
+            session = {"session_id": session_id, "cwd": state.get("cwd", cwd),
+                       "client_tag": CLIENT_TAG, "turns": turns}
+            _deliver_session(session, "finalize" if event == "SessionEnd" else "turn")
+            _debug(f"delivered {len(turns)} turns  session={session_id[:8]}  event={event}")
+        if event == "SessionEnd":
+            try:
+                _pending_path(session_id).unlink()
+            except Exception:  # noqa: BLE001
+                pass
+        return 0
+
+    _debug(f"ignored event {event!r}")
+    return 0
+
+
+def _iso_now() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+if __name__ == "__main__":
+    sys.exit(main())
