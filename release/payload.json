@@ -7,7 +7,7 @@
       "id": "becos",
       "runtime": "claude",
       "source_repo": "becos-ai/becos-claude-plugin",
-      "source_subdir": "becos",
+      "source_subdir": "codecollab",
       "dest": "becos",
       "manifest": ".claude-plugin/plugin.json",
       "include": [".claude-plugin", ".mcp.json", "commands", "contracts", "hooks", "scripts"],

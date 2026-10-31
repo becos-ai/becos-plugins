@@ -55,7 +55,7 @@ python3 release/sync_payload.py --plugin becos --from ~/vonic_code/becos-claude-
 
    | Source repo | id | `source_subdir` | `dest` | What it is |
    | --- | --- | --- | --- | --- |
-   | `becos-ai/becos-claude-plugin` | `becos` | `becos` | `becos/` | the Claude Code plugin, `becos@becos` |
+   | `becos-ai/becos-claude-plugin` | `becos` | `codecollab` | `becos/` | the Claude Code plugin, `becos@becos` |
    | | `codecollab` | `legacy/codecollab` | `codecollab/` | retired stub: tells `codecollab@becos` users to switch |
    | `becos-ai/codex-codecollab-plugin` | `becos-codex` | `.` | `becos-codex/` | the Codex plugin, `becos@becos` |
    | | `codex-codecollab` | `legacy` | `codex-codecollab/` | retired stub: tells `codex-codecollab@becos` users to switch |
