@@ -36,6 +36,7 @@ _PENDING_FILE = "gateway-auth-pending.json"
 # test_connect asserts the two stay equal. They drifted once already, and the result was that
 # login kept demanding a gateway long after capture.py had stopped needing one.
 _DEFAULT_GATEWAY = "https://becos.ai"
+_DEV_GATEWAY = "https://dev.becos.ai"
 
 
 class ConnectError(Exception):
@@ -115,8 +116,10 @@ def _cached_gateway() -> str:
 
 
 def _resolve_gateway(argument: str | None) -> str:
+    dev = os.environ.get("VONIC_DEV") == "1" or os.environ.get("VONIC_CODECOLLAB_DEV") == "1"
+    default_gw = _DEV_GATEWAY if dev else _DEFAULT_GATEWAY
     gateway = (argument or os.environ.get("VONIC_GATEWAY_URL") or _cached_gateway()
-               or _DEFAULT_GATEWAY).strip()
+               or default_gw).strip()
     gateway = gateway.rstrip("/")
     if not gateway:
         # Only reachable if _DEFAULT_GATEWAY is emptied; kept so that cannot fail silently.

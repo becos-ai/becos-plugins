@@ -71,6 +71,7 @@ _CONFIG_TTL = 3600  # fallback cache lifetime when the gateway gives no expiry
 # Hosted gateway. Last resort in _resolve_gateway, so a downloaded plugin works after
 # /codecollab:login alone; self-hosted installs override with VONIC_GATEWAY_URL.
 _DEFAULT_GATEWAY = "https://becos.ai"
+_DEV_GATEWAY = "https://dev.becos.ai"
 _LOGIN_COMMAND_RE = re.compile(
     r"(?:^\s*/codecollab:login(?:\s|$)|<command-(?:message|name)>\s*/?codecollab:login\s*</command-(?:message|name)>)",
     re.IGNORECASE,
@@ -2367,6 +2368,8 @@ def _resolve_gateway() -> str:
     not a requirement: requiring it made capture and recall no-op silently for anyone who
     installed the plugin and ran /codecollab:login without also running setup.sh.
     """
+    dev = os.environ.get("VONIC_DEV") == "1" or os.environ.get("VONIC_CODECOLLAB_DEV") == "1"
+    default_gw = _DEV_GATEWAY if dev else _DEFAULT_GATEWAY
     env = _valid_gateway(os.environ.get("VONIC_GATEWAY_URL", "").strip().rstrip("/"),
                          "VONIC_GATEWAY_URL")
     cached = _cached_gateway()
@@ -2375,12 +2378,14 @@ def _resolve_gateway() -> str:
         # also exactly what a poisoned environment looks like, so never do it silently.
         _warn(f"VONIC_GATEWAY_URL ({_url_host(env)}) overrides the gateway you logged in "
               f"to ({_url_host(cached)}); captured turns will be sent to {_url_host(env)}")
-    return env or cached or _DEFAULT_GATEWAY
+    return env or cached or default_gw
 
 
 def _resolve_becos_url() -> str:
     """becos MCP endpoint: explicit env, else <gateway>/mcp/ — the same default setup.sh writes."""
-    return os.environ.get("VONIC_BECOS_URL", "").strip() or f"{_resolve_gateway()}/mcp/"
+    dev = os.environ.get("VONIC_DEV") == "1" or os.environ.get("VONIC_CODECOLLAB_DEV") == "1"
+    default_becos = f"{_DEV_GATEWAY}/mcp/" if dev else ""
+    return os.environ.get("VONIC_BECOS_URL", "").strip() or default_becos or f"{_resolve_gateway()}/mcp/"
 
 
 def _resolve_gbrain() -> tuple[str, str]:
@@ -2675,6 +2680,13 @@ def _build_events(buf: dict) -> list[dict]:
     # Turns recorded before 0.18.0 carry no identity snapshot; the live work tree is their fallback.
     live = _git_identity(buf.get("cwd", ""), session_id)
     projects = _projects_on()
+    if projects and _project(lambda mod: mod.is_coding_mode(buf.get("cwd", ""), session_id)):
+        dropped = sum(1 for t in turns if not t.get("uploaded"))
+        if dropped:
+            _debug(f"coding mode — dropping {dropped} unscoped turn(s)")
+        for t in turns:
+            t["uploaded"] = True
+        return []
     if (projects and not _identity_scoped(live)
             and not any(_identity_scoped(t.get("git") or {}) for t in turns)):
         # No project chosen yet: keep the turns; they ship once the session has one (chosen, or

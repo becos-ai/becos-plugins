@@ -59,6 +59,11 @@ def project_start(event: dict) -> tuple[str, str]:
     if resolved.source == "git":
         context = (f"CodeCollab project for this session: {resolved.name} (git repo; it can't be "
                    "changed).")
+    elif resolved.type == project.TYPE_NONE:
+        context = ("CodeCollab: this session is in Coding Mode (no project memory attached). If "
+                   "the user asks to save this session to a project, run "
+                   f'`python3 "{project.__file__}" --cwd "{cwd}" --session "{session_id}" list` '
+                   "and then `... use <name>` (or `use --new [<name>]`).")
     else:
         context = (f"CodeCollab project for this session: {resolved.name} ({resolved.type}). If "
                    "the user asks to use another project for this session, run "
@@ -96,6 +101,14 @@ def session_start_output(event: dict) -> tuple[str | None, str | None]:
         context, notice = "", ""
     if context:
         text = f"{text}\n\n{context}" if text else context
+    try:
+        persistence = project.persistence_instructions(project.file_persistence(
+            event.get("cwd") or os.getcwd(), event.get("session_id")))
+        # The Claude bridge has stood-down hooks: its OpenCode adapter declares the real owner.
+        if project.enabled() and not capture.hosted_by_opencode():
+            text = f"{text}\n\n{persistence}" if text else persistence
+    except Exception:  # noqa: BLE001 — never fabricate an enabled capability on error
+        pass
     try:
         # The project's compiled folder (project_repo.py): name it, then refresh it detached.
         cwd = event.get("cwd") or os.getcwd()
