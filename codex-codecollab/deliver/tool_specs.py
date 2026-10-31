@@ -173,10 +173,11 @@ def tools(host: str = "claude", *, projects: bool = True, shared: bool = True,
              "inputSchema": _obj({})},
             {"name": "codecollab_project_use",
              "description": ("Change where this conversation's captured work is filed: an existing project "
-                             "by name, or new=true (name optional). " + rule),
+                             "by name, new=true (name optional), or none=true for coding mode. " + rule),
              "inputSchema": _obj({
                  "name": {"type": "string", "description": "The project name (or the new project's name)."},
-                 "new": {"type": "boolean", "description": "Create a new project (name optional = generated)."}})},
+                 "new": {"type": "boolean", "description": "Create a new project (name optional = generated)."},
+                 "none": {"type": "boolean", "description": "Work in coding mode (no project memory attached)."}})},
         ]
     if shared:
         out += [

@@ -196,7 +196,8 @@ def tool_rulebook(args: dict) -> str:
 def tool_project(_args: dict) -> str:
     import project  # noqa: PLC0415
     session, _ = _session()
-    return project.format_options(project.options(_workspace(), session))
+    return (project.format_options(project.options(_workspace(), session)) + "\n\n" +
+            project.persistence_instructions(project.file_persistence(_workspace(), session)))
 
 
 def tool_project_use(args: dict) -> str:
@@ -204,12 +205,17 @@ def tool_project_use(args: dict) -> str:
     session, _ = _session()
     if not session:
         raise ValueError("this session is not identified yet; send a prompt first")
+    if args.get("none") is True:
+        resolved = project.use(_workspace(), session, None, none=True)
+        return ("This conversation is now in coding mode (no project memory attached).\n\n" +
+                project.persistence_instructions(project.file_persistence(_workspace(), session)))
     name = args.get("name").strip() if isinstance(args.get("name"), str) and args.get("name").strip() else None
     if not name and args.get("new") is not True:
-        return "An existing project name is required (or new=true); nothing recorded."
+        return "An existing project name is required (or new=true, or none=true); nothing recorded."
     resolved = project.use(_workspace(), session, name, new=args.get("new") is True)
     where = f" ({project._short(resolved.dot_path)})" if resolved.dot_path else ""
-    return f"This conversation now uses project {resolved.name}{where}."
+    return (f"This conversation now uses project {resolved.name}{where}.\n\n" +
+            project.persistence_instructions(project.file_persistence(_workspace(), session)))
 
 
 def shared_command(name: str, args: dict, session: str | None) -> dict:

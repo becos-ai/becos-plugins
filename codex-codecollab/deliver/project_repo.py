@@ -185,9 +185,10 @@ def sync(name: str, *, force: bool = False) -> dict:
         raise SyncError("the CodeCollab token names no team")
     _save_state({"tenants": {**(_state().get("tenants") or {}), _gateway_host(): tenant}})
     path = local_path(tenant, name)
+    missing = not os.path.isdir(os.path.join(path, ".git"))
     stamps = _state().get("synced") or {}
     last = stamps.get(path, 0) if isinstance(stamps, dict) else 0
-    if not force and time.time() - float(last or 0) < _interval():
+    if not force and not missing and time.time() - float(last or 0) < _interval():
         return {"status": "skipped", "reason": "recent", "path": path}
     lock = _lock(os.path.join(root(), ".locks", f"{tenant}-{name}.lock"))
     if lock is None:
@@ -328,6 +329,12 @@ def due(cwd: str | None, session_id: object) -> bool:
     if name is None:
         return False
     if not tenant:
+        return True
+    try:
+        path = local_path(tenant, name)
+        if not os.path.isdir(os.path.join(path, ".git")):
+            return True
+    except ValueError:
         return True
     stamps = _state().get("synced") or {}
     last = stamps.get(local_path(tenant, name), 0) if isinstance(stamps, dict) else 0
