@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# The becos local MCP server for Codex (stdio). Codex starts it with cwd = the plugin root ("cwd": "." in
+# mcp.json; it does not expand ${PLUGIN_ROOT}) and a minimal environment, so this launcher loads the same
+# ~/.codex/codecollab.env the hooks source, pins the Codex client tag, and runs the vendored server.
+set -a
+[ -f "${CODEX_HOME:-$HOME/.codex}/codecollab.env" ] && . "${CODEX_HOME:-$HOME/.codex}/codecollab.env" >/dev/null 2>&1
+set +a
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export VONIC_CODECOLLAB_CLIENT_TAG=cx VONIC_CODECOLLAB_MCP_HOST=codex
+export VONIC_CODECOLLAB_BACKFILL_SCRIPT="$ROOT/deliver/cx_backfill.py"
+exec python3 "$ROOT/deliver/codecollab_mcp.py"

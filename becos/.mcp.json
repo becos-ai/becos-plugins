@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "becos": {
+      "command": "python3",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/codecollab_mcp.py"],
+      "env": { "VONIC_CODECOLLAB_MCP_HOST": "claude" }
+    }
+  }
+}

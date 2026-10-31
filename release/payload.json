@@ -10,7 +10,7 @@
       "source_subdir": "becos",
       "dest": "becos",
       "manifest": ".claude-plugin/plugin.json",
-      "include": [".claude-plugin", "commands", "contracts", "hooks", "scripts"],
+      "include": [".claude-plugin", ".mcp.json", "commands", "contracts", "hooks", "scripts"],
       "exclude": ["**/__pycache__/**", "**/*.pyc", "scripts/test_*.py"]
     },
     {
