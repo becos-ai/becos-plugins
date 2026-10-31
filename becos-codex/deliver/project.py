@@ -475,7 +475,7 @@ def start(cwd: str | None, session_id: object = None) -> Resolution | None:
                 if tenant:
                     try:
                         p = project_repo.local_path(tenant, resolved.name)
-                        missing = not os.path.isdir(os.path.join(p, ".git"))
+                        missing = not project_repo.present(p)
                     except ValueError:
                         missing = True
                 if missing:
@@ -699,14 +699,14 @@ def use(cwd: str | None, session_id: object, name: str | None = None, *, new: bo
             if tenant:
                 try:
                     p = project_repo.local_path(tenant, resolved.name)
-                    missing = not os.path.isdir(os.path.join(p, ".git"))
+                    missing = not project_repo.present(p)
                 except ValueError:
                     missing = True
             if missing:
                 try:
                     project_repo.sync(resolved.name, force=True)
                 except Exception as exc:
-                    capture._debug(f"project: initial clone failed: {exc}")
+                    capture._debug(f"project: initial download failed: {exc}")
                     project_repo.spawn_sync(cwd, session_id, force=True)
             else:
                 project_repo.spawn_sync(cwd, session_id, force=True)
@@ -717,7 +717,7 @@ def use(cwd: str | None, session_id: object, name: str | None = None, *, new: bo
     return resolved
     try:
         import project_repo  # noqa: PLC0415 — lazy: it imports this module
-        project_repo.spawn_sync(cwd, session_id, force=True)   # clone the chosen project's folder
+        project_repo.spawn_sync(cwd, session_id, force=True)   # download the chosen project's folder
     except Exception as exc:  # noqa: BLE001 — never fails the choice
         capture._debug(f"project: repo sync not started: {type(exc).__name__}")
     return resolved
