@@ -495,7 +495,7 @@ def _query_scope(
         # The session's project (project.py): a git repo with a remote, else the chosen project;
         # no project yet = no recall, as outside git before.
         resolved = capture._project(lambda mod: mod.resolve(cwd, session_id))
-        if resolved is None:
+        if resolved is None or not resolved.key or resolved.type == "coding-mode":
             return None
         event["repo_name"] = resolved.key
         in_git = capture._is_git(cwd)

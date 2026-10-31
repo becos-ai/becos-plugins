@@ -131,6 +131,8 @@ def persist_enabled() -> bool:
     handoffs and turn only this behaviour off.
     """
     return (os.environ.get("VONIC_CODECOLLAB_DISABLED") != "1"
+            and (capture._client_tag() != "oc"
+                 or os.environ.get("VONIC_CODECOLLAB_PERSIST_PIPELINE", "1") == "1")
             and hook_enabled()
             and capture._flag_default_on("VONIC_CODECOLLAB_PERSIST_FILES"))
 
