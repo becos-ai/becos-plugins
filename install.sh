@@ -66,6 +66,14 @@ while [ $# -gt 0 ]; do
 done
 
 has() { command -v "$1" >/dev/null 2>&1; }
+
+# Agents' own installers often add their folder to PATH only in ~/.zshrc or ~/.bashrc, which a
+# `curl | bash` run may not have loaded. Look in those folders too.
+for dir in "$HOME/.local/bin" "$HOME/.claude/local" "$HOME/.opencode/bin" "$HOME/.bun/bin" \
+           "$HOME/.npm-global/bin" "/opt/homebrew/bin" "/usr/local/bin"; do
+  if [ -d "$dir" ] && [[ ":$PATH:" != *":$dir:"* ]]; then PATH="$PATH:$dir"; fi
+done
+export PATH
 wanted() { [ -z "$ONLY" ] || [[ ",$ONLY," == *",$1,"* ]]; }
 
 # Prompts read from the terminal, not stdin: under `curl | bash` stdin is this script.
