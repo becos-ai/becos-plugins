@@ -1,7 +1,13 @@
 {
   "name": "becos",
-  "interface": { "displayName": "Becos" },
+  "interface": { "displayName": "becos" },
   "plugins": [
+    {
+      "name": "becos",
+      "source": { "source": "local", "path": "./becos-codex" },
+      "policy": { "installation": "AVAILABLE", "authentication": "ON_USE" },
+      "category": "Productivity"
+    },
     {
       "name": "codex-codecollab",
       "source": { "source": "local", "path": "./codex-codecollab" },

@@ -4,8 +4,10 @@
 # becos-ai/becos-plugins monorepo as ONE squashed commit, then tags it there.
 #
 # Set PLUGIN_ID below to the id in becos-plugins/release/payload.json:
-#   becos-ai/becos-claude-plugin     -> codecollab
-#   becos-ai/codex-codecollab-plugin -> codex-codecollab
+#   becos-ai/becos-claude-plugin     -> becos, codecollab (retired stub)
+#   becos-ai/codex-codecollab-plugin -> becos-codex, codex-codecollab (retired stub)
+# A repo that publishes two ids runs this job as a matrix over PLUGIN_ID with
+# max-parallel: 1 (see the source repos' own copies).
 #
 # Requires secret BECOS_PLUGINS_TOKEN: a fine-grained PAT scoped to
 # becos-ai/becos-plugins with Contents: read and write.
