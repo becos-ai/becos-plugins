@@ -38,8 +38,9 @@ The question is: `$ARGUMENTS`
    - **Plain language:** keep cite ids, file paths, flags and commit hashes out of the sentences.
      Write people's names, not emails, when the output makes the person clear.
    - **Numbered sources:** each entry in the output carries a ready-made link like
-     `[[1]](https://…/sources/…)`; copy it right after a claim taken from that entry. Readers see a
-     clickable `[1]`. Never write an id or a URL of your own.
+     `[[1]](https://…/sources/…)`; copy the **whole** link, `(url)` part included, right after a
+     claim taken from that entry. Readers see a clickable `[1]`; a bare `[[1]]` or `[1]` is not
+     clickable. Never write an id or a URL of your own.
    - **Who said it:** an entry marked as proposed by an agent was the agent's, not the person's;
      say so and, when the output shows it, what it was answering.
    - **Sources at the end:** finish with the output's closing `Sources: [all N](…)` line exactly
