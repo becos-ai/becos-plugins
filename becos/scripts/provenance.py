@@ -121,14 +121,14 @@ def _team_activity_cc() -> str:
 
 
 def _team_activity_cx() -> str:
-    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "team_activity.py")
-    run = ("bash -lc 'set -a; [ -f \"$HOME/.codex/codecollab.env\" ] && "
-           ". \"$HOME/.codex/codecollab.env\" >/dev/null 2>&1; set +a; "
-           f"exec python3 \"{script}\" -'")
+    # The `becos_team` tool (the plugin's MCP server), not a shell command: Codex runs the model's
+    # shell in a sandbox with no network, so the script fails there (2026-11-02), while the tool runs
+    # outside it, as Codex's hooks do. Claude Code's shell isn't sandboxed, which is why it can run
+    # the script directly.
     return _TEAM_ACTIVITY_HEAD + (
-        f"run `{run}` in the shell, giving the user's question verbatim on stdin (a quoted "
-        "heredoc), never interpolated into the command line (the `becos-team` skill does "
-        "this)." + _TEAM_ACTIVITY_TAIL)
+        "call the `becos_team` tool with the user's question verbatim (the `becos-team` skill "
+        "does this). Don't run the script in the shell: Codex's sandbox has no network, so it "
+        "fails there." + _TEAM_ACTIVITY_TAIL)
 
 
 def team_activity_instructions(env: Mapping[str, str] | None = None) -> str:
