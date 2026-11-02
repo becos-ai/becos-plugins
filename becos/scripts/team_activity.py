@@ -8,8 +8,9 @@ Answers questions about what people on the team did, decided or changed, and who
 what ("what did nikhil do today?", "changes in becos-memforest this week", "who is working on
 vonic-agent?"), from captured coding sessions across the tenant's repositories. The server plans
 the question (one LLM call), validates it against the tenant's known people and repositories, and
-filters deterministically; this script only forwards the question and prints the result: a header
-stating the filters used, then fact/decision lines with author badges, repo, time and cite ids.
+filters deterministically; this script forwards the question and prints the result (a header
+stating the filters used, then fact/decision lines with author badges, repo, time and cite ids),
+ending with one `Sources:` link that opens every cited entry on the becos site.
 
 Used by the `/becos-team` command and called by the agent itself (the session instructions
 name this script's absolute path). Exit codes: 0 answered (or no matching activity), 1 the call
@@ -21,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -29,6 +31,9 @@ import gbrain_client  # noqa: E402
 
 TOOL = "vonic_team_activity"
 _DEFAULT_TIMEOUT = 60.0
+_CITED = re.compile(r"\(cite: ((?:decision|fact)_[0-9a-f]+)\)")
+# A link this long still opens everywhere; a longer answer links its first ids only.
+SOURCES_MAX_IDS = 50
 
 
 def _timeout() -> float:
@@ -56,12 +61,28 @@ def arguments(question: str, *, person: str | None = None, repo: str | None = No
     return args
 
 
+def sources_line(text: str, becos_url: str) -> str | None:
+    """One link that opens every entry ``text`` cites, in order, on the becos site's sources
+    page (``<site>/sources/<id>,<id>``; sign-in required, any team member). Built here, not by
+    the agent, so an id is never mistyped or invented. None when nothing is cited."""
+    ids = list(dict.fromkeys(_CITED.findall(text)))
+    if not ids:
+        return None
+    shown = ids[:SOURCES_MAX_IDS]
+    more = f" (the first {len(shown)} of {len(ids)})" if len(ids) > len(shown) else ""
+    site = becos_url.split("/mcp", 1)[0].rstrip("/")
+    return (f"Sources: every entry cited above{more}, in order, on one page (sign-in "
+            f"required): {site}/sources/{','.join(shown)}")
+
+
 def ask(args: dict) -> str:
     url, token = capture._resolve_becos()
     result = gbrain_client.call_tool(
         url, token, TOOL, args, _timeout(), extra_headers=capture._becos_identity_headers()
     )
-    return _text(result)
+    text = _text(result)
+    line = sources_line(text, url)
+    return f"{text}\n{line}" if line else text
 
 
 def main(argv: list[str]) -> int:

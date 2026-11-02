@@ -24,11 +24,27 @@ The question is: `$ARGUMENTS`
    ls ~/.claude/plugins/cache/*/becos/*/scripts/team_activity.py 2>/dev/null | tail -1
    ```
 
-3. Answer **only** from its output. The first line states the filters it used (people,
-   repositories, time window, topic) — repeat that scope in one short line, then summarise the
-   activity: group by person or day as the output does, keep the author emails and repositories,
-   and cite ids where a claim rests on one entry. Do not add items from git, files or memory
-   unless the user asks; if you do, label them as coming from git.
+3. Answer **only** from its output, for a reader who leads the team: themes, not a log. Do not
+   add items from git, files or memory unless the user asks; if you do, label them as coming from
+   git.
+   - **Scope first:** one line repeating the output's first line (people, repositories, time
+     window). A day in the window with no entries means no work was recorded that day: say which
+     days, and when the latest entry was.
+   - **A week or longer:** what shipped, then one line per theme (infra, tooling, a feature…),
+     each saying what changed for users rather than which file or setting changed. Then **now**:
+     what the latest sessions show; when they don't show it, say it's unclear and why.
+   - **One day:** lead with the day's main outcome, then risks on their own line, then smaller
+     items, then what was left open.
+   - **Plain language:** keep cite ids, file paths, flags and commit hashes out of the sentences.
+     Write people's names, not emails, when the output makes the person clear.
+   - **Who said it:** an entry marked as proposed by an agent was the agent's, not the person's;
+     say so and, when the output shows it, what it was answering.
+   - **Sources at the end:** finish with the output's `Sources:` link exactly as printed (it opens
+     every cited entry on one page). Never build or edit that link yourself. If the output has
+     none, list the cite ids once at the end instead.
+   - **When another agent will read the answer** (the user asks for a handoff, a file or
+     structured data): give fields instead of prose — scope, latest entry, days with no entries,
+     now (or `unknown`), recently finished and risks, each item with its cite id.
 4. If the output says nothing matched, say so and suggest widening the window or naming a
    person/repository. If it starts with `Error:` or the script fails, report that recall is
    unavailable (re-run `/becos:login` if it mentions authentication).

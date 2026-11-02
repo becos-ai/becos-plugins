@@ -103,7 +103,10 @@ _TEAM_ACTIVITY_TAIL = """\
  It searches captured coding sessions across the team's repositories and returns facts and \
 decisions with their author, repository and time. Answer from that result first and say so; git \
 history is a secondary source (it misses discussions, decisions and uncommitted work) — label \
-anything taken from it."""
+anything taken from it. Write for a reader who leads the team: what shipped and the main themes, \
+not a day-by-day log; what they're on now (say it's unclear when the latest sessions don't show \
+it); days in the window with no entries (no work recorded). Keep cite ids out of the \
+sentences and end with the result's `Sources:` link exactly as printed."""
 _TEAM_ACTIVITY_TOOL = _TEAM_ACTIVITY_HEAD + (
     "call the `becos_team` tool with the user's question verbatim." + _TEAM_ACTIVITY_TAIL)
 
