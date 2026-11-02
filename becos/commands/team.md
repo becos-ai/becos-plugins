@@ -37,11 +37,15 @@ The question is: `$ARGUMENTS`
      items, then what was left open.
    - **Plain language:** keep cite ids, file paths, flags and commit hashes out of the sentences.
      Write people's names, not emails, when the output makes the person clear.
+   - **Numbered sources:** each entry in the output carries a marker like `[[1]][s1]`; copy it
+     right after a claim taken from that entry. Readers see a clickable `[1]`. Never write an id or
+     a URL in the sentence.
    - **Who said it:** an entry marked as proposed by an agent was the agent's, not the person's;
      say so and, when the output shows it, what it was answering.
-   - **Sources at the end:** finish with the output's `Sources:` link exactly as printed (it opens
-     every cited entry on one page). Never build or edit that link yourself. If the output has
-     none, list the cite ids once at the end instead.
+   - **Sources at the end:** finish with `Sources: [all N][s-all]` (N as the output says), then a
+     blank line and the output's link lines (`[s1]: …` through `[s-all]: …`) exactly as printed.
+     They render as hidden links, so readers see only the numbers. Never build or edit a link.
+     If the output has no numbered entries, list the cite ids once at the end instead.
    - **When another agent will read the answer** (the user asks for a handoff, a file or
      structured data): give fields instead of prose — scope, latest entry, days with no entries,
      now (or `unknown`), recently finished and risks, each item with its cite id.
