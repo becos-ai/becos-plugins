@@ -21,7 +21,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-TEMPLATE_VERSION = 3
+TEMPLATE_VERSION = 4
 MARKER = f"becos-backfill-skill v{TEMPLATE_VERSION}"
 
 
@@ -81,6 +81,36 @@ def remove_codecollab_skills() -> list[str]:
     return removed
 
 
+# Codex's default sandbox (workspace-write) has no network and writes only inside the workspace, so
+# a skill's becos command run there can't reach becos.ai or write ~/.codex (the desktop app hit this
+# on login, 2026-11-02; the team skill on 2026-10-06). Hooks aren't sandboxed, which is why capture
+# and recall kept working. Every skill that runs a becos command says to run it outside the
+# sandbox, which makes Codex ask the user to approve; nothing in the user's sandbox settings changes.
+SANDBOX_NOTE = """\
+**Run becos commands outside the Codex sandbox.** Each command in this skill calls becos.ai and \
+reads or writes becos's own files under `~/.codex` and `~/.cache/codecollab`. Codex's default \
+sandbox blocks both (no network; writes only inside the workspace). So run each command with \
+escalated permissions (outside the sandbox), justified as "becos needs network access and its own \
+config folders"; Codex then asks the user to approve. If the user declines or escalation isn't \
+available, say so and give the user the command to run in their own terminal.
+"""
+
+
+def _outside_sandbox(render):
+    """Put ``SANDBOX_NOTE`` right after the skill's first ``# `` heading."""
+    def wrapped(plugin_root: Path) -> str:
+        text = render(plugin_root)
+        lines = text.split("\n")
+        at = next((i for i, ln in enumerate(lines) if ln.startswith("# ")), None)
+        if at is None:
+            return text
+        return "\n".join(lines[:at + 1] + ["", SANDBOX_NOTE.rstrip("\n")] + lines[at + 1:])
+    wrapped.__name__ = render.__name__
+    wrapped.__doc__ = render.__doc__
+    return wrapped
+
+
+@_outside_sandbox
 def _render(plugin_root: Path) -> str:
     script = plugin_root / "deliver" / "cx_backfill.py"
     # Source the hook env (VONIC_BECOS_URL / _TOKEN_CMD / AUTHOR_NAME) then run the core, exactly as
@@ -155,10 +185,11 @@ def ensure_backfill_skill(plugin_root: Path) -> None:
         pass
 
 
-LOGIN_TEMPLATE_VERSION = 3
+LOGIN_TEMPLATE_VERSION = 4
 LOGIN_MARKER = f"becos-login-skill v{LOGIN_TEMPLATE_VERSION}"
 
 
+@_outside_sandbox
 def _render_login(plugin_root: Path) -> str:
     """The `/login` skill — the in-chat surface for the WHOLE sign-in, first run included.
 
@@ -233,10 +264,11 @@ verifier, or pending-state contents.
 """
 
 
-TEAM_TEMPLATE_VERSION = 2
+TEAM_TEMPLATE_VERSION = 3
 TEAM_MARKER = f"becos-team-skill v{TEAM_TEMPLATE_VERSION}"
 
 
+@_outside_sandbox
 def _render_team(plugin_root: Path) -> str:
     """The `becos-team` skill: team-activity questions answered by the server's
     `vonic_team_activity` through the vendored ``team_activity.py``.
@@ -310,10 +342,11 @@ def ensure_team_skill(plugin_root: Path) -> None:
         pass
 
 
-RULEBOOK_TEMPLATE_VERSION = 1
+RULEBOOK_TEMPLATE_VERSION = 2
 RULEBOOK_MARKER = f"becos-rulebook-skill v{RULEBOOK_TEMPLATE_VERSION}"
 
 
+@_outside_sandbox
 def _render_rulebook(plugin_root: Path) -> str:
     """The `becos-rulebook` skill: the user's learned repository rules (server tool
     `vonic_rulebook`) through the vendored ``rulebook.py``. Choices go on stdin as JSON through a
@@ -372,10 +405,11 @@ def ensure_rulebook_skill(plugin_root: Path) -> None:
         pass
 
 
-PROJECT_TEMPLATE_VERSION = 2
+PROJECT_TEMPLATE_VERSION = 3
 PROJECT_MARKER = f"becos-project-skill v{PROJECT_TEMPLATE_VERSION}"
 
 
+@_outside_sandbox
 def _render_project(plugin_root: Path) -> str:
     """The `becos-project` skill: which becos project this conversation is saved to,
     through the bundled tools (``becos_project`` / ``becos_project_use``)."""
@@ -411,9 +445,9 @@ def ensure_project_skill(plugin_root: Path) -> None:
         pass
 
 
-SHARE_TEMPLATE_VERSION = 3
+SHARE_TEMPLATE_VERSION = 4
 SHARE_MARKER = f"becos-share-skill v{SHARE_TEMPLATE_VERSION}"
-SHARED_TEMPLATE_VERSION = 3
+SHARED_TEMPLATE_VERSION = 4
 SHARED_MARKER = f"becos-shared-skill v{SHARED_TEMPLATE_VERSION}"
 
 # A hook cannot require an approval prompt on Codex (PreToolUse `ask` is rejected as unsupported and
@@ -436,6 +470,7 @@ def _shared_command(plugin_root: Path) -> str:
     return f"bash -lc '{env}exec python3 \"{script}\" command-json --cwd \"$PWD\"'"
 
 
+@_outside_sandbox
 def _render_share(plugin_root: Path) -> str:
     return f"""---
 name: becos-share
@@ -477,6 +512,7 @@ hand off.
 """
 
 
+@_outside_sandbox
 def _render_shared(plugin_root: Path) -> str:
     return f"""---
 name: becos-shared
