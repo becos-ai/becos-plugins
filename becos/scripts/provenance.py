@@ -33,16 +33,18 @@ PROVENANCE_INSTRUCTIONS = """\
 ## Repository provenance
 Tag each claim drawn from repository contents (a finding, decision, constraint, change, verification or reference) inline, in the message where you first state it, narration between tool calls included:
 `[repo:<alias> path:<repo-relative-path> symbol:<symbol>]`
+- This includes operational results: commits and their hashes, branch, rebase and push outcomes, merge conflicts, test and build results, and files you created, edited or deleted. Short, status-only and resumed-after-interruption replies follow the same rule.
 - `<alias>`: the repository's name from its `origin` remote, without the owner (not the local directory name; no `origin`: the directory name). `path:` and `symbol:` are optional; add them when known. Keys in this order; values contain no spaces or `]`.
 - One repository per token. A sentence drawing on two repositories gets one token per clause.
 - Name the repository you actually inspected; never guess. Uncertain: `[repo:unknown]`. Your own inference: `[analysis]`.
-Example: `[repo:agent path:src/memory/store.py symbol:MemoryStore.save]`"""
+Example: `[repo:agent path:src/memory/store.py symbol:MemoryStore.save]`
+Before sending a reply, check that every repository claim in it carries a token."""
 
 # Worded as a standing rule (it is delivered once, not beside each digest), and it says a handoff
 # is not recalled memory: the handoff quotes earlier replies' grade lines, which must not be graded.
 RECALL_FEEDBACK_INSTRUCTIONS = """\
 ## Recalled-memory feedback
-When a turn's context includes a `<recalled-memory>` block, end that reply with one line grading it; otherwise omit the line. A `<repository-handoff>` block is not recalled memory.
+When a turn's context includes a `<recalled-memory>` block, end that reply with one line grading it, however short or operational the reply; otherwise omit the line. A `<repository-handoff>` block is not recalled memory.
 `[recall-relevance: <grade>] [recall-tokens-saved: ~<N>]` — <basis>
 - `<grade>`: `low`, `medium`, `good`, `very good` or `excellent`: how relevant the recalled facts were to the turn.
 - `<N>`: rough tokens the memory saved you (reads, searches, re-derivation); `~0` if none. `<basis>` names that work in a few words."""
