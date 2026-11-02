@@ -10,7 +10,7 @@ vonic-agent?"), from captured coding sessions across the tenant's repositories. 
 the question (one LLM call), validates it against the tenant's known people and repositories, and
 filters deterministically; this script forwards the question and prints the result (a header
 stating the filters used, then fact/decision lines with author badges, repo, time and cite ids),
-ending with one `Sources:` link that opens every cited entry on the becos site.
+with each cited entry marked [[n]][sn] and, at the end, the markdown link definitions for them.
 
 Used by the `/becos-team` command and called by the agent itself (the session instructions
 name this script's absolute path). Exit codes: 0 answered (or no matching activity), 1 the call
@@ -61,18 +61,30 @@ def arguments(question: str, *, person: str | None = None, repo: str | None = No
     return args
 
 
-def sources_line(text: str, becos_url: str) -> str | None:
-    """One link that opens every entry ``text`` cites, in order, on the becos site's sources
-    page (``<site>/sources/<id>,<id>``; sign-in required, any team member). Built here, not by
-    the agent, so an id is never mistyped or invented. None when nothing is cited."""
+def with_sources(text: str, becos_url: str) -> str:
+    """``text`` with each cited entry marked ``[[n]][sn]`` (one number per id, in order) and a
+    ready-made block of markdown link definitions at the end: ``[sn]: <site>/sources/<id>`` per
+    entry and ``[s-all]: <site>/sources/<id>,<id>`` for all of them (the becos site's sources
+    page; sign-in required, any team member). The agent copies an entry's marker after a claim and
+    pastes the block as-is, so a rendered answer shows small clickable ``[n]``s, never ids or URLs,
+    and no id is ever typed or invented. ``sn`` labels rather than ``n``: a label equal to the
+    visible ``[n]`` makes some renderers (marked) nest a link inside the link. Unchanged when
+    nothing is cited."""
     ids = list(dict.fromkeys(_CITED.findall(text)))
     if not ids:
-        return None
-    shown = ids[:SOURCES_MAX_IDS]
-    more = f" (the first {len(shown)} of {len(ids)})" if len(ids) > len(shown) else ""
+        return text
+    number = {cid: n for n, cid in enumerate(ids, 1)}
+    text = _CITED.sub(lambda m: f"[[{number[m.group(1)]}]][s{number[m.group(1)]}] {m.group(0)}",
+                      text)
     site = becos_url.split("/mcp", 1)[0].rstrip("/")
-    return (f"Sources: every entry cited above{more}, in order, on one page (sign-in "
-            f"required): {site}/sources/{','.join(shown)}")
+    linked = ids[:SOURCES_MAX_IDS]
+    more = f" (the first {len(linked)} of {len(ids)})" if len(ids) > len(linked) else ""
+    block = [f"[s{number[cid]}]: {site}/sources/{cid}" for cid in linked]
+    block.append(f"[s-all]: {site}/sources/{','.join(linked)}")
+    return (f"{text}\n\nSources{more}: after a claim, copy the marker of the entry it came from "
+            f"(like [[1]][s1]); end the answer with \"Sources: [all {len(linked)}][s-all]\", a "
+            "blank line, then these lines exactly as printed (they render as hidden links, "
+            "sign-in required):\n" + "\n".join(block))
 
 
 def ask(args: dict) -> str:
@@ -80,9 +92,7 @@ def ask(args: dict) -> str:
     result = gbrain_client.call_tool(
         url, token, TOOL, args, _timeout(), extra_headers=capture._becos_identity_headers()
     )
-    text = _text(result)
-    line = sources_line(text, url)
-    return f"{text}\n{line}" if line else text
+    return with_sources(_text(result), url)
 
 
 def main(argv: list[str]) -> int:
