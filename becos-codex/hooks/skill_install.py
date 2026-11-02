@@ -264,7 +264,7 @@ verifier, or pending-state contents.
 """
 
 
-TEAM_TEMPLATE_VERSION = 4
+TEAM_TEMPLATE_VERSION = 5
 TEAM_MARKER = f"becos-team-skill v{TEAM_TEMPLATE_VERSION}"
 
 
@@ -324,8 +324,9 @@ decisions with their author, repository and time — not git commits).
    - **Who said it:** an entry marked as proposed by an agent was the agent's, not the person's;
      say so and, when the output shows it, what it was answering.
    - **Numbered sources:** each entry in the output carries a ready-made link like
-     `[[1]](https://…/sources/…)`; copy it right after a claim taken from that entry. Readers see a
-     clickable `[1]`. Never write an id or a URL of your own.
+     `[[1]](https://…/sources/…)`; copy the **whole** link, `(url)` part included, right after a
+     claim taken from that entry. Readers see a clickable `[1]`; a bare `[[1]]` or `[1]` is not
+     clickable. Never write an id or a URL of your own.
    - **Sources at the end:** finish with the output's closing `Sources: [all N](…)` line exactly as
      printed. Never build or edit a link. If the output has no numbered entries, list the cite ids
      once at the end instead.

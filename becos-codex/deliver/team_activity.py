@@ -78,8 +78,9 @@ def with_sources(text: str, becos_url: str) -> str:
         lambda m: f"[[{number[m.group(1)]}]]({site}/sources/{m.group(1)}) {m.group(0)}", text)
     linked = ids[:SOURCES_MAX_IDS]
     more = f" (the first {len(linked)} of {len(ids)})" if len(ids) > len(linked) else ""
-    return (f"{text}\n\nAfter a claim, copy the link of the entry it came from (like "
-            f"[[1]]({site}/sources/{ids[0]})); end the answer with this line exactly as printed"
+    return (f"{text}\n\nAfter a claim, copy the WHOLE link of the entry it came from, the "
+            f"(url) part included, e.g. [[1]]({site}/sources/{ids[0]}). A bare [[1]] or [1] "
+            "is not clickable. End the answer with this line exactly as printed"
             f"{more} (sign-in required):\nSources: [all {len(linked)}]({site}/sources/"
             f"{','.join(linked)})")
 
