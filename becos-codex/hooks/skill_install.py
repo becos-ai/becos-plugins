@@ -264,7 +264,7 @@ verifier, or pending-state contents.
 """
 
 
-TEAM_TEMPLATE_VERSION = 3
+TEAM_TEMPLATE_VERSION = 4
 TEAM_MARKER = f"becos-team-skill v{TEAM_TEMPLATE_VERSION}"
 
 
@@ -295,8 +295,13 @@ decisions with their author, repository and time — not git commits).
 
 1. If there is no question, ask what the user wants to know (a person, a repository, a topic, or a
    time range) and stop.
-2. Run the script with the user's question **verbatim on stdin** — never interpolate it into the
-   command line:
+2. Call the `becos_team` tool with the user's question **verbatim** as `question`. It runs outside
+   Codex's sandbox (as the becos hooks do), so it reaches becos.ai and returns the entries with
+   their ready-made source links. Prefer it over the shell.
+
+   Only if that tool isn't available, run the script with the question **verbatim on stdin**, never
+   interpolated into the command line, **outside the sandbox** (escalated permissions, as the note
+   at the top says; inside the sandbox it fails with no network):
 
    ```
    {run} <<'BECOS_QUESTION'

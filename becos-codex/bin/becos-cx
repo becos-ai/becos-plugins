@@ -12,8 +12,8 @@ Browser sign-in (PKCE, two steps — no email, OTP, or password):
       → completes the sign-in with the code shown after authorizing, and verifies the mint.
 
 The hooks themselves live inside the plugin (hooks/hooks.json, auto-discovered when the plugin is
-enabled) — login only configures AUTH/ENV. After it succeeds: enable Codex hooks
-(`codex features enable hooks`), TRUST the hooks on first run, and restart Codex. Never prints the JWT.
+enabled) — login only configures AUTH/ENV. After it succeeds: quit and reopen Codex, TRUST the becos
+hooks (/hooks) and start a new task. Never prints the JWT.
 """
 from __future__ import annotations
 
@@ -146,10 +146,12 @@ def login_complete(code: str) -> int:
     if rc.returncode != 0:
         die("gateway authorization failed (start over with:  becos-cx login --gateway <url>)")
     _verify_mint()
-    print("\nAuth is ready. Enable + trust the hooks, then restart Codex:\n"
-          "  1. codex features enable hooks\n"
-          "  2. Restart Codex (or start a new task) and TRUST the becos hooks when prompted.\n"
-          "  3. Ask a question; check ~/.cache/codecollab/cx-plugin.log and for a -cx- page in becos.\n"
+    print("\nAuth is ready. Then:\n"
+          "  1. Quit and reopen Codex (the desktop app loads plugins only at launch).\n"
+          "  2. TRUST the becos hooks: in /hooks, or when Codex prompts. Hooks are on by default\n"
+          "     in current Codex; only an old Codex needs `codex features enable hooks`.\n"
+          "  3. Start a new task (that installs the becos skills), then ask a question; check\n"
+          "     ~/.cache/codecollab/cx-plugin.log.\n"
           "Recommended: `becos-cx approvals` lets the becos read tools (recall, status, inbox)\n"
           "run without a prompt and makes Codex ask before every mutating one (send, accept, decline,\n"
           "download, claim, re-file, deliver a backfill). It edits ~/.codex/config.toml; --remove undoes it.")
