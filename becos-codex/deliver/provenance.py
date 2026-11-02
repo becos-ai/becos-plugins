@@ -106,9 +106,8 @@ history is a secondary source (it misses discussions, decisions and uncommitted 
 anything taken from it. Write for a reader who leads the team: what shipped and the main themes, \
 not a day-by-day log; what they're on now (say it's unclear when the latest sessions don't show \
 it); days in the window with no entries (no work recorded). Keep cite ids out of the \
-sentences: after a claim, copy its entry's marker (like `[[2]][s2]`, shown as a clickable \
-`[2]`), and end with `Sources: [all N][s-all]` followed by the result's link lines exactly as \
-printed."""
+sentences: after a claim, copy its entry's ready-made link (like `[[2]](https://…)`, shown as \
+a clickable `[2]`), and end with the result's `Sources: [all N](…)` line exactly as printed."""
 _TEAM_ACTIVITY_TOOL = _TEAM_ACTIVITY_HEAD + (
     "call the `becos_team` tool with the user's question verbatim." + _TEAM_ACTIVITY_TAIL)
 
