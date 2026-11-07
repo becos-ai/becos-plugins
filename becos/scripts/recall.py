@@ -147,6 +147,15 @@ _SCOPE = os.environ.get("VONIC_RECALL_SCOPE", "branch").strip().lower()
 # vonic-agent that predates migration 0019_query_caller_agent forbids the extra key and would fail
 # every recall. Set to "1" only after the server carrying that field is deployed. See _query_scope.
 _FORWARD_CALLER_AGENT = os.environ.get("VONIC_CODECOLLAB_FORWARD_CALLER_AGENT", "0") == "1"
+# Same-session recall: an adapter that knows what its model still sees passes `visible_since` (host
+# epoch seconds of the first message the model sees verbatim; 0 = never compacted) and `exclude_ids`
+# (fact/decision ids it already delivered in full). The server then drops those, so the budget goes
+# to memory the model does not already have. ON BY DEFAULT (user decision, 2026-11-07); only an
+# explicit "0" turns it off. A server older than vonic_agent fa6602d rejects these metadata keys
+# (extra="forbid"), so a client pointed at such a server must set it to 0.
+_FORWARD_RECALL_VISIBILITY = os.environ.get("VONIC_CODECOLLAB_FORWARD_RECALL_VISIBILITY", "1") != "0"
+_MAX_EXCLUDE_IDS = 256
+_RECALL_ID = re.compile(r"(?:fact|decision)_[0-9a-f]{8,64}")
 
 # The server returns its routing/query errors as ORDINARY STRINGS on the same channel as an
 # answer. Injecting one would hand the model "Repository memory is unavailable." *as recalled
@@ -531,6 +540,122 @@ def _query_scope(
     return scope
 
 
+def _visibility(payload: dict, scope: dict) -> dict:
+    """`visible_since` / `exclude_ids` from the hook payload, validated; {} when absent or invalid.
+
+    `visible_since` needs the session it is relative to, so it rides only when the scope names one.
+    Invalid values are dropped rather than sent: the server validates them, and a malformed value
+    must never be able to fail the whole recall."""
+    out: dict = {}
+    since = payload.get("visible_since")
+    if (scope.get("session_id") and isinstance(since, (int, float)) and not isinstance(since, bool)
+            and since == since and 0 <= since < 1e11):
+        out["visible_since"] = float(since)
+    ids = payload.get("exclude_ids")
+    if isinstance(ids, list):
+        kept = [i for i in ids if isinstance(i, str) and _RECALL_ID.fullmatch(i)]
+        if kept:
+            out["exclude_ids"] = list(dict.fromkeys(kept))[-_MAX_EXCLUDE_IDS:]
+    return out
+
+
+# ── What the model already sees, for hook-driven hosts (Claude Code, Codex, Cursor) ──────────────
+# An adapter with a session API (OpenCode V1/V2) computes `visible_since` / `exclude_ids` itself and
+# passes them. A hook-driven host has no such API, so the shared core keeps them per session in a
+# small private file: `since` = when the host last compacted this conversation (0 = never; recorded
+# by its compaction hook: Claude Code / Codex `SessionStart` source "compact", Cursor `preCompact`),
+# and `ids` = fact/decision ids delivered in full since then. A compaction clears `ids`: the model
+# no longer has those items verbatim. A missed compaction hook only costs useful memory in that one
+# session (its own older turns stay filtered); it never sends anything the server would reject.
+_SEEN_ID_RE = re.compile(r"\((?:cite|fact): ((?:fact|decision)_[0-9a-f]{8,64})\)")
+
+
+def _seen_path(session_id: str) -> str | None:
+    slug = capture._slugify(str(session_id or "")[:128])
+    if not slug:
+        return None
+    path = os.path.join(capture._cache_dir(), capture._client_tag(), "seen")
+    try:
+        os.makedirs(path, mode=0o700, exist_ok=True)
+    except OSError:
+        return None
+    return os.path.join(path, f"{slug}.json")
+
+
+def seen_state(session_id: str | None) -> dict:
+    """``{"visible_since": s, "exclude_ids": [...]}`` for a hook-driven session ({} without one)."""
+    path = _seen_path(session_id) if session_id else None
+    if not path:
+        return {}
+    try:
+        with open(path, encoding="utf-8") as fh:
+            state = json.load(fh)
+    except (OSError, ValueError):
+        state = {}
+    if not isinstance(state, dict) or state.get("session_id") not in (None, session_id):
+        state = {}
+    since = state.get("since")
+    ids = state.get("ids")
+    return {"visible_since": float(since) if isinstance(since, (int, float)) and since >= 0 else 0.0,
+            "exclude_ids": [i for i in ids if isinstance(i, str)] if isinstance(ids, list) else []}
+
+
+def _write_seen(session_id: str, since: float, ids: list) -> None:
+    path = _seen_path(session_id)
+    if not path:
+        return
+    try:
+        tmp = f"{path}.{os.getpid()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump({"session_id": session_id, "since": since, "ids": ids[-_MAX_EXCLUDE_IDS:],
+                       "updated_at": time.time()}, fh)
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def note_compaction(session_id: str | None, at: float | None = None) -> None:
+    """The host compacted this conversation: what came before is no longer in view verbatim."""
+    if session_id:
+        _write_seen(session_id, float(time.time() if at is None else at), [])
+
+
+def note_delivered(session_id: str | None, text: str) -> None:
+    """Record the ids of the items in recall text actually handed to the model."""
+    if not (session_id and isinstance(text, str)):
+        return
+    found = _SEEN_ID_RE.findall(text)
+    if not found:
+        return
+    state = seen_state(session_id)
+    ids = list(dict.fromkeys([*(i for i in state["exclude_ids"] if i not in found), *found]))
+    _write_seen(session_id, state["visible_since"], ids)
+
+
+def _seen_mode(payload: dict) -> str:
+    """``core`` (read the state and record what is delivered), ``read``, or "" (adapter-owned)."""
+    if "visible_since" in payload:
+        return ""   # the adapter knows what its model sees (OpenCode V1/V2)
+    mode = payload.get("seen")
+    if mode in ("core", "read"):
+        return mode
+    return "core" if payload.get("hook_event_name") == "UserPromptSubmit" or (
+        capture._client_tag() == "cc" and not payload.get("recall_source")) else ""
+
+
+def compacted_main() -> int:
+    """`recall.py compacted`: a host compaction hook (stdin = its payload)."""
+    try:
+        payload = json.load(sys.stdin)
+    except Exception:  # noqa: BLE001
+        return 0
+    if isinstance(payload, dict):
+        sid = payload.get("session_id") or payload.get("conversation_id") or payload.get("thread_id")
+        if payload.get("source") in (None, "compact") or payload.get("hook_event_name") == "preCompact":
+            note_compaction(str(sid) if sid else None)
+    return 0
+
+
 def _client_identity() -> dict:
     """Which tool and build is asking, as siblings of ``event`` on the query metadata.
 
@@ -742,6 +867,11 @@ def main() -> int:
     scope = _query_scope(
         cwd, payload.get("session_id"), payload.get("caller_agent")
     )                                         # also names the source on the injected wrapper
+    seen_mode = _seen_mode(payload) if _FORWARD_RECALL_VISIBILITY and not subagent else ""
+    if scope is not None and _FORWARD_RECALL_VISIBILITY:
+        if seen_mode:
+            payload = {**payload, **seen_state(scope.get("session_id"))}
+        scope.update(_visibility(payload, scope))
     if scope is None:
         # Repository memory is the only brain becos may read. An unscoped vonic_query
         # routes to the *general* brain, so a cwd that resolves to no repo (or SCOPE=off)
@@ -788,6 +918,8 @@ def main() -> int:
     _log(f"inject  {len(answer)}c  prompt={prompt[:60]!r}  ::  {snippet}")
 
     parts.append(_wrap(answer, scope))   # explicit provenance — see _emit_context
+    if seen_mode == "core":
+        note_delivered(scope.get("session_id"), answer)
     if not subagent:
         _note_entity_history(answer, payload.get("session_id"))
     parts.extend(tail)
@@ -796,7 +928,7 @@ def main() -> int:
 
 if __name__ == "__main__":
     try:
-        sys.exit(main())
+        sys.exit(compacted_main() if sys.argv[1:2] == ["compacted"] else main())
     except Exception as exc:  # noqa: BLE001 — a recall hook must never break the session
         _debug(f"unexpected: {exc}")
         sys.exit(0)

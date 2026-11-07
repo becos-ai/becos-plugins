@@ -100,7 +100,8 @@ def tool_recall(args: dict) -> str:
         return "No query supplied and this session's current prompt was not observed; pass `query`."
     request = {"prompt": text, "cwd": _workspace(), "recall_source": "tool", "caller_mode": "primary"}
     if session:
-        request["session_id"] = session
+        # The tool result is shown to the model, so recall.py also records what it delivers.
+        request["session_id"], request["seen"] = session, "core"
     done = subprocess.run([sys.executable, os.path.join(HERE, "recall.py")], input=json.dumps(request),
                           capture_output=True, text=True, check=False, timeout=65)
     try:

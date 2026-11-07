@@ -617,7 +617,11 @@ def use(cwd: str | None, session_id: object, name: str | None = None, *, new: bo
     cwd = cwd or os.getcwd()
     slug = git_project(cwd)
     if slug:
-        raise ValueError(f"this session is in git repo {slug}; its project can't be changed")
+        raise ValueError(
+            f"This session is connected to a Git repository ({slug}), so its project can't be changed "
+            "or connected to a becos no-code project. Start a session outside the Git repository "
+            "to select a no-code project. Nothing was changed."
+        )
     if not _session_path(session_id):
         raise ValueError("a session id is required")
 

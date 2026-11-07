@@ -27,6 +27,12 @@
           { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/instructions.py\" session-start", "timeout": 5 },
           { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/shared_handoff.py\" refresh", "timeout": 5 }
         ]
+      },
+      {
+        "matcher": "compact",
+        "hooks": [
+          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/recall.py\" compacted", "timeout": 5 }
+        ]
       }
     ],
     "SubagentStart": [
