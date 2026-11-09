@@ -253,8 +253,15 @@ def shared_command(name: str, args: dict, session: str | None) -> dict:
         return command
     if name == "becos_shared":
         action = args.get("action")
+        if isinstance(action, str):
+            action = action.strip().lower()
+        # A model told to fetch one package sometimes names only the package: with a handoff_id and
+        # no action, read it. Any other value is refused and named, so the caller can correct it.
+        if action in (None, "") and isinstance(args.get("handoff_id"), str) and args["handoff_id"].strip():
+            action = "get"
         if action not in ("list", "get", "seen"):
-            raise ValueError("action must be list, get or seen")
+            received = "no action" if action in (None, "") else f"action {str(action)[:40]!r}"
+            raise ValueError(f"action must be list, get or seen (received {received})")
         command = {"command": action}
         if action != "list":
             command["handoff_id"] = _text(args.get("handoff_id"), "handoff_id")
