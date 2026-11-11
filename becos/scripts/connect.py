@@ -116,7 +116,7 @@ def _cached_gateway() -> str:
 
 
 def _resolve_gateway(argument: str | None) -> str:
-    dev = os.environ.get("VONIC_DEV") == "1" or os.environ.get("VONIC_CODECOLLAB_DEV") == "1"
+    dev = os.environ.get("VONIC_DEV") == "1"
     default_gw = _DEV_GATEWAY if dev else _DEFAULT_GATEWAY
     gateway = (argument or os.environ.get("VONIC_GATEWAY_URL") or _cached_gateway()
                or default_gw).strip()
