@@ -2369,7 +2369,7 @@ def _resolve_gateway() -> str:
     not a requirement: requiring it made capture and recall no-op silently for anyone who
     installed the plugin and ran /becos:login without also running setup.sh.
     """
-    dev = os.environ.get("VONIC_DEV") == "1" or os.environ.get("VONIC_CODECOLLAB_DEV") == "1"
+    dev = os.environ.get("VONIC_DEV") == "1"
     default_gw = _DEV_GATEWAY if dev else _DEFAULT_GATEWAY
     env = _valid_gateway(os.environ.get("VONIC_GATEWAY_URL", "").strip().rstrip("/"),
                          "VONIC_GATEWAY_URL")
@@ -2384,7 +2384,7 @@ def _resolve_gateway() -> str:
 
 def _resolve_becos_url() -> str:
     """becos MCP endpoint: explicit env, else <gateway>/mcp/ — the same default setup.sh writes."""
-    dev = os.environ.get("VONIC_DEV") == "1" or os.environ.get("VONIC_CODECOLLAB_DEV") == "1"
+    dev = os.environ.get("VONIC_DEV") == "1"
     default_becos = f"{_DEV_GATEWAY}/mcp/" if dev else ""
     return os.environ.get("VONIC_BECOS_URL", "").strip() or default_becos or f"{_resolve_gateway()}/mcp/"
 
